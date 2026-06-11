@@ -37,6 +37,7 @@ export type MilenaCommandErrorCode =
   | "environment-secret-store-failed"
   | "environment-secret-missing"
   | "environment-auth-template-invalid"
+  | "environment-import-invalid"
   | "kafka-auth-unsupported"
   | "kafka-operation-failed"
   | "kafka-session-not-found"
@@ -106,6 +107,16 @@ export type SavedEnvironment = {
   username: string;
   authPropertiesTemplate: string;
   passwordSecretRef: string;
+};
+
+export type ImportKafkaShellEnvironmentRequest = {
+  environmentName: string;
+  environmentFilePath: string;
+  authPropertiesPath: string;
+};
+
+export type ImportKafkaShellEnvironmentResponse = {
+  environment: SavedEnvironment;
 };
 
 export type RuntimeAuthConfig = {
@@ -202,6 +213,15 @@ export async function saveEnvironment(
   request: SaveEnvironmentRequest,
 ): Promise<SavedEnvironment> {
   return invoke<SavedEnvironment>("save_environment", { request });
+}
+
+export async function importKafkaShellEnvironment(
+  request: ImportKafkaShellEnvironmentRequest,
+): Promise<ImportKafkaShellEnvironmentResponse> {
+  return invoke<ImportKafkaShellEnvironmentResponse>(
+    "import_kafka_shell_environment",
+    { request },
+  );
 }
 
 export async function listKafkaTopics(

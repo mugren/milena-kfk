@@ -57,6 +57,20 @@ pub struct SaveEnvironmentRequest {
     pub auth_properties_template: String,
 }
 
+#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportKafkaShellEnvironmentRequest {
+    pub environment_name: String,
+    pub environment_file_path: String,
+    pub auth_properties_path: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportKafkaShellEnvironmentResponse {
+    pub environment: SavedEnvironment,
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedEnvironment {
@@ -294,6 +308,13 @@ impl MilenaCommandError {
         }
     }
 
+    pub fn environment_import_invalid(cause: impl ToString) -> Self {
+        Self {
+            code: MilenaCommandErrorCode::EnvironmentImportInvalid,
+            message: cause.to_string(),
+        }
+    }
+
     pub fn kafka_auth_unsupported(cause: impl ToString) -> Self {
         Self {
             code: MilenaCommandErrorCode::KafkaAuthUnsupported,
@@ -338,6 +359,7 @@ pub enum MilenaCommandErrorCode {
     EnvironmentSecretStoreFailed,
     EnvironmentSecretMissing,
     EnvironmentAuthTemplateInvalid,
+    EnvironmentImportInvalid,
     KafkaAuthUnsupported,
     KafkaOperationFailed,
     KafkaSessionNotFound,

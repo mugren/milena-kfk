@@ -3,15 +3,17 @@ use tauri::Manager;
 
 pub mod command_boundary;
 pub mod contracts;
+pub mod environment_import;
 pub mod environments;
 pub mod kafka_adapter;
 
 use contracts::{
-    AppState, CommandResult, KafkaConsumerSession, KafkaTopicList, ListKafkaTopicsRequest,
-    MilenaBoundaryEvent, PublishKafkaRecordRequest, PublishKafkaRecordResponse, RuntimeAuthConfig,
-    SaveEnvironmentRequest, SavedEnvironment, StartKafkaConsumerSessionRequest,
-    StopKafkaConsumerSessionRequest, StopKafkaConsumerSessionResponse, TopicSessionPreview,
-    TopicSessionPreviewRequest,
+    AppState, CommandResult, ImportKafkaShellEnvironmentRequest,
+    ImportKafkaShellEnvironmentResponse, KafkaConsumerSession, KafkaTopicList,
+    ListKafkaTopicsRequest, MilenaBoundaryEvent, PublishKafkaRecordRequest,
+    PublishKafkaRecordResponse, RuntimeAuthConfig, SaveEnvironmentRequest, SavedEnvironment,
+    StartKafkaConsumerSessionRequest, StopKafkaConsumerSessionRequest,
+    StopKafkaConsumerSessionResponse, TopicSessionPreview, TopicSessionPreviewRequest,
 };
 use environments::MacosKeychainEnvironmentSecretStore;
 use kafka_adapter::NativeKafkaAdapter;
@@ -67,6 +69,22 @@ fn materialize_runtime_auth_config(
 }
 
 #[tauri::command]
+fn import_kafka_shell_environment(
+    app_handle: tauri::AppHandle,
+    request: ImportKafkaShellEnvironmentRequest,
+) -> CommandResult<ImportKafkaShellEnvironmentResponse> {
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(contracts::MilenaCommandError::environment_storage_failed)?;
+    environment_import::import_kafka_shell_environment(
+        &config_dir,
+        request,
+        &MacosKeychainEnvironmentSecretStore,
+    )
+}
+
+#[tauri::command]
 fn list_kafka_topics(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: ListKafkaTopicsRequest,
@@ -109,6 +127,7 @@ pub fn run() {
             save_environment,
             load_environment,
             materialize_runtime_auth_config,
+            import_kafka_shell_environment,
             list_kafka_topics,
             publish_kafka_record,
             start_kafka_consumer_session,

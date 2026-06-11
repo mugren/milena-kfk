@@ -158,6 +158,8 @@ pub fn materialize_runtime_auth_config(
         })?;
     let substituted = metadata
         .auth_properties_template
+        .replace("${KAFKA_USER}", &metadata.username)
+        .replace("${KAFKA_PASS}", &password)
         .replace("$KAFKA_USER", &metadata.username)
         .replace("$KAFKA_PASS", &password);
 
