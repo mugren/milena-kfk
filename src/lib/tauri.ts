@@ -24,6 +24,15 @@ export type TopicSessionPreview = {
   status: "ready";
 };
 
+export type MilenaCommandErrorCode =
+  | "topic-required"
+  | "event-delivery-failed";
+
+export type MilenaCommandError = {
+  code: MilenaCommandErrorCode;
+  message: string;
+};
+
 export type MilenaBoundaryEvent =
   | {
       event: "boundaryOpened";
