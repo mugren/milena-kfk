@@ -1,8 +1,8 @@
 use tauri::ipc::Channel;
 
 use crate::contracts::{
-    AppState, CommandResult, MilenaBoundaryEvent, MilenaCapability, MilenaCommandError,
-    TopicSessionMode, TopicSessionPreview, TopicSessionPreviewRequest, CAPABILITIES,
+    AppState, CommandResult, MilenaBoundaryEvent, MilenaCommandError, TopicSessionMode,
+    TopicSessionPreview, TopicSessionPreviewRequest, CAPABILITIES,
 };
 
 pub trait BoundaryEventEmitter {
