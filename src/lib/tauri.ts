@@ -190,7 +190,18 @@ export type KafkaRecordEvent = {
   offset: number;
   key?: string | null;
   payload?: string | null;
+  headers?: KafkaRecordHeaders | null;
+  receivedAt?: string | null;
 };
+
+export type KafkaRecordHeader = {
+  key: string;
+  value?: string | null;
+};
+
+export type KafkaRecordHeaders =
+  | KafkaRecordHeader[]
+  | Record<string, string | string[] | null>;
 
 export async function loadAppState(): Promise<AppState> {
   return invoke<AppState>("get_app_state");

@@ -15,6 +15,16 @@ import {
   stopPanePollingSession,
 } from "./lib/polling";
 import {
+  readMessageRenderPreferences,
+  renderKafkaRecord,
+  setTopicMessageRenderMode,
+  topicMessageRenderMode,
+  type MessageRenderMode,
+  type MessageRenderPreferences,
+  type MessageRenderPreferenceStore,
+  type RenderedKafkaRecord,
+} from "./lib/messages";
+import {
   createInitialTopicRailState,
   environmentKey,
   markTopicLoadFailed,
@@ -70,6 +80,9 @@ function App() {
   const [workspace, setWorkspace] = useState(createInitialWorkspaceState);
   const [topicRail, setTopicRail] = useState(() =>
     createInitialTopicRailState(getTopicPinStore()),
+  );
+  const [messageRenderPreferences, setMessageRenderPreferences] = useState(() =>
+    readMessageRenderPreferences(getMessageRenderPreferenceStore()),
   );
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [appError, setAppError] = useState<string | null>(null);
@@ -163,6 +176,18 @@ function App() {
   function pinTopic(topic: string) {
     setTopicRail((current) =>
       toggleTopicPin(current, activeEnvironmentKey, topic, getTopicPinStore()),
+    );
+  }
+
+  function setMessageRenderMode(topic: string, mode: MessageRenderMode) {
+    setMessageRenderPreferences((current) =>
+      setTopicMessageRenderMode(
+        current,
+        activeEnvironmentKey,
+        topic,
+        mode,
+        getMessageRenderPreferenceStore(),
+      ),
     );
   }
 
@@ -322,7 +347,13 @@ function App() {
                     <strong>{topic.name}</strong>
                     <small>{topic.partitionCount} partitions</small>
                   </span>
-                  <span className="topic-mode">JSON</span>
+                  <span className="topic-mode">
+                    {topicMessageRenderMode(
+                      messageRenderPreferences,
+                      activeEnvironmentKey,
+                      topic.name,
+                    ).toUpperCase()}
+                  </span>
                 </button>
                 <button
                   className="topic-pin"
@@ -381,6 +412,9 @@ function App() {
               }}
               onPoll={() => pane.topic && startPolling(pane.id, pane.topic)}
               onPublish={() => openBoundary(pane.id, "publish")}
+              environmentKey={activeEnvironmentKey}
+              renderPreferences={messageRenderPreferences}
+              onRenderModeChange={setMessageRenderMode}
               onSplit={(direction) => splitPane(pane.id, direction)}
               onStop={() => stopPane(pane.id)}
             />
@@ -462,6 +496,9 @@ type PaneProps = {
   onActivate: () => void;
   onPoll: () => void;
   onPublish: () => void;
+  environmentKey: string;
+  renderPreferences: MessageRenderPreferences;
+  onRenderModeChange: (topic: string, mode: MessageRenderMode) => void;
   onSplit: (direction: SplitDirection) => void;
   onStop: () => void;
 };
@@ -473,11 +510,35 @@ function Pane({
   onActivate,
   onPoll,
   onPublish,
+  environmentKey,
+  renderPreferences,
+  onRenderModeChange,
   onSplit,
   onStop,
 }: PaneProps) {
   const empty = isPaneEmpty(pane);
   const canStart = canStartPaneSession(pane);
+  const renderMode = topicMessageRenderMode(
+    renderPreferences,
+    environmentKey,
+    pane.topic,
+  );
+  const [expandedRows, setExpandedRows] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const recordEvents = pane.activity.filter(isKafkaRecordEvent);
+
+  function toggleRow(identity: string) {
+    setExpandedRows((current) => {
+      const next = new Set(current);
+      if (next.has(identity)) {
+        next.delete(identity);
+      } else {
+        next.add(identity);
+      }
+      return next;
+    });
+  }
 
   return (
     <article
@@ -570,23 +631,128 @@ function Pane({
         <section className="consumer">
           <header>
             <span className="eyebrow">Consumer</span>
-            <span className={`status-pill ${pane.status}`}>{pane.status}</span>
+            <div className="consumer-controls">
+              {pane.topic ? (
+                <label
+                  className="render-mode-control"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <span>Render</span>
+                  <select
+                    aria-label={`Render mode for ${pane.topic}`}
+                    value={renderMode}
+                    onChange={(event) =>
+                      onRenderModeChange(
+                        pane.topic ?? "",
+                        event.currentTarget.value as MessageRenderMode,
+                      )
+                    }
+                  >
+                    <option value="json">JSON</option>
+                    <option value="raw">Raw</option>
+                  </select>
+                </label>
+              ) : null}
+              <span className={`status-pill ${pane.status}`}>{pane.status}</span>
+            </div>
           </header>
           <div className="message-stream">
-            {pane.activity.length === 0 ? (
+            {recordEvents.length === 0 ? (
               <p className="empty-state">Inactive</p>
             ) : (
-              pane.activity.map((event, index) => (
-                <article className="message-row" key={`${event.event}-${index}`}>
-                  <span className="message-meta">{eventMeta(event)}</span>
-                  <span className="topic-label">{eventTopic(event, pane)}</span>
-                  <code>{eventPayload(event)}</code>
-                </article>
-              ))
+              recordEvents.map((event) => {
+                const collapsed = renderKafkaRecord(event.data.record, {
+                  mode: renderMode,
+                });
+                const rendered = renderKafkaRecord(event.data.record, {
+                  mode: renderMode,
+                  expanded: expandedRows.has(collapsed.identity),
+                });
+
+                return (
+                  <MessageStreamRow
+                    key={rendered.identity}
+                    message={rendered}
+                    onToggle={() => toggleRow(rendered.identity)}
+                  />
+                );
+              })
             )}
           </div>
         </section>
       </div>
+    </article>
+  );
+}
+
+function MessageStreamRow({
+  message,
+  onToggle,
+}: {
+  message: RenderedKafkaRecord;
+  onToggle: () => void;
+}) {
+  return (
+    <article
+      className={[
+        "message-row",
+        message.expanded ? "expanded" : "",
+        message.payload.invalidJson ? "invalid-json" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <button
+        className="message-row-summary"
+        type="button"
+        aria-expanded={message.expanded}
+        onClick={stopEvent(onToggle)}
+      >
+        <span className="message-toggle" aria-hidden="true">
+          {message.expanded ? "-" : "+"}
+        </span>
+        <span className="message-meta">{message.receiveTime}</span>
+        <span className="topic-label">{message.topic}</span>
+        <span className="message-meta">
+          p{message.partition} / {message.offset}
+        </span>
+        {message.key ? (
+          <span className="message-key">key {message.key}</span>
+        ) : null}
+        <span className="message-preview">
+          {message.payload.marker ? (
+            <span className="message-marker">{message.payload.marker}</span>
+          ) : null}
+          <code>{message.payload.preview}</code>
+          {message.payload.truncated ? (
+            <span className="message-marker">truncated</span>
+          ) : null}
+        </span>
+      </button>
+
+      {message.expanded ? (
+        <div className="message-expanded">
+          <pre>{message.payload.content}</pre>
+          {message.payload.truncated ? (
+            <span className="message-marker">payload truncated</span>
+          ) : null}
+          <section className="message-headers" aria-label="Kafka headers">
+            <span className="eyebrow">Headers</span>
+            {message.headers.length === 0 ? (
+              <p>No headers</p>
+            ) : (
+              <dl>
+                {message.headers.map((header, index) => (
+                  <div key={`${header.key}-${index}`}>
+                    <dt>{header.key}</dt>
+                    <dd>{formatHeaderValue(header.value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </section>
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -655,36 +821,23 @@ function topicRailStatus(status: string, topicCount: number) {
   return `${topicCount} topics / manual refresh`;
 }
 
-function eventMeta(event: MilenaBoundaryEvent) {
-  if (event.event === "kafkaRecord") {
-    const record = event.data.record;
-    return `p${record.partition} / offset ${record.offset}`;
-  }
-
-  return event.event;
+function isKafkaRecordEvent(
+  event: MilenaBoundaryEvent,
+): event is Extract<MilenaBoundaryEvent, { event: "kafkaRecord" }> {
+  return event.event === "kafkaRecord";
 }
 
-function eventTopic(event: MilenaBoundaryEvent, pane: WorkspacePane) {
-  if (event.event === "kafkaRecord") {
-    return event.data.record.topic;
-  }
-
-  if (event.event === "kafkaConsumerStarted") {
-    return event.data.topics.join(", ");
-  }
-
-  return pane.topic ?? "none";
-}
-
-function eventPayload(event: MilenaBoundaryEvent) {
-  if (event.event === "kafkaRecord") {
-    return event.data.record.payload ?? "";
-  }
-
-  return JSON.stringify(event.data);
+function formatHeaderValue(value: string | null | undefined): string {
+  return value ?? "(null)";
 }
 
 function getTopicPinStore(): TopicPinStore | undefined {
+  return typeof window === "undefined" ? undefined : window.localStorage;
+}
+
+function getMessageRenderPreferenceStore():
+  | MessageRenderPreferenceStore
+  | undefined {
   return typeof window === "undefined" ? undefined : window.localStorage;
 }
 

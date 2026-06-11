@@ -14,6 +14,7 @@ import {
   stopPane,
   type WorkspaceState,
 } from "./workspace";
+import { stampKafkaRecordReceivedAt } from "./messages";
 
 export type StartConsumerSession = (
   request: StartKafkaConsumerSessionRequest,
@@ -39,6 +40,7 @@ export type PanePollingOptions = {
   isCurrent?: () => boolean;
   onEvent?: (event: MilenaBoundaryEvent) => void;
   onStopError?: (error: string) => void;
+  now?: () => Date;
 };
 
 export type StopPanePollingOptions = {
@@ -71,6 +73,7 @@ export async function startPanePollingSession({
   isCurrent = () => true,
   onEvent,
   onStopError,
+  now = () => new Date(),
 }: PanePollingOptions): Promise<KafkaConsumerSession | null> {
   const existingSessionId = getPanePollingSessionId(getWorkspace(), paneId);
   if (existingSessionId && stopConsumerSession) {
@@ -91,8 +94,11 @@ export async function startPanePollingSession({
           return;
         }
 
-        updateWorkspace((current) => appendPaneActivity(current, paneId, event));
-        onEvent?.(event);
+        const receivedEvent = stampKafkaRecordReceivedAt(event, now());
+        updateWorkspace((current) =>
+          appendPaneActivity(current, paneId, receivedEvent),
+        );
+        onEvent?.(receivedEvent);
       },
     );
 
