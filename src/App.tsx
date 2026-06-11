@@ -1,11 +1,25 @@
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   AppState,
   MilenaBoundaryEvent,
+  RuntimeAuthConfig,
   TopicSessionPreviewRequest,
+  listKafkaTopics,
   loadAppState,
   previewTopicSession,
 } from "./lib/tauri";
+import {
+  createInitialTopicRailState,
+  environmentKey,
+  markTopicLoadFailed,
+  markTopicLoadStarted,
+  markTopicLoadSucceeded,
+  openTopicEnvironment,
+  setTopicSearch,
+  toggleTopicPin,
+  visibleTopicRows,
+  type TopicPinStore,
+} from "./lib/topics";
 import {
   appendPaneActivity,
   assignTopicToPane,
@@ -23,30 +37,31 @@ import {
   type WorkspacePane,
 } from "./lib/workspace";
 
-type Topic = {
-  name: string;
-  partitions: number;
-  lag: number;
-  pinned?: boolean;
-};
-
 type ActivityEntry = MilenaBoundaryEvent & {
   paneId: number;
   time: string;
 };
 
-const topics: Topic[] = [
-  { name: "orders.created", partitions: 12, lag: 0, pinned: true },
-  { name: "payments.authorized", partitions: 8, lag: 4 },
-  { name: "inventory.adjusted", partitions: 6, lag: 0 },
-  { name: "shipments.dispatched", partitions: 4, lag: 17 },
-];
+const activeRuntimeAuth: RuntimeAuthConfig = {
+  environment: "local-dev",
+  brokers: ["localhost:9092"],
+  properties: {
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "PLAIN",
+    "sasl.username": "local",
+    "sasl.password": "local",
+  },
+};
 
 function App() {
   const [appState, setAppState] = useState<AppState | null>(null);
   const [workspace, setWorkspace] = useState(createInitialWorkspaceState);
+  const [topicRail, setTopicRail] = useState(() =>
+    createInitialTopicRailState(getTopicPinStore()),
+  );
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [appError, setAppError] = useState<string | null>(null);
+  const requestedTopicLoads = useRef(new Set<string>());
 
   useEffect(() => {
     loadAppState()
@@ -56,6 +71,7 @@ function App() {
           cause instanceof Error ? cause.message : "Tauri runtime unavailable";
         setAppError(message);
       });
+    void loadTopicList(false);
   }, []);
 
   const activePane = useMemo(
@@ -64,17 +80,53 @@ function App() {
   );
 
   const activeTopic = activePane?.topic ?? null;
+  const activeEnvironmentKey = environmentKey(activeRuntimeAuth);
+  const topicRows = useMemo(() => visibleTopicRows(topicRail), [topicRail]);
 
   const selectedTopicMeta = useMemo(() => {
-    const selected = topics.find((topic) => topic.name === activeTopic);
+    const selected = topicRail.topics.find(
+      (topic) => topic.name === activeTopic,
+    );
     return selected
-      ? `${selected.partitions} partitions / lag ${selected.lag} / JSON`
+      ? `${selected.partitionCount} partitions / JSON`
       : "No topic assigned / no active Kafka session";
-  }, [activeTopic]);
+  }, [activeTopic, topicRail.topics]);
 
   function selectTopic(topic: string) {
     setWorkspace((current) =>
       assignTopicToPane(current, current.selectedPaneId, topic),
+    );
+  }
+
+  async function loadTopicList(force: boolean) {
+    const key = environmentKey(activeRuntimeAuth);
+    if (!force && requestedTopicLoads.current.has(key)) {
+      setTopicRail((current) => openTopicEnvironment(current, key));
+      return;
+    }
+
+    requestedTopicLoads.current.add(key);
+    setTopicRail((current) => markTopicLoadStarted(current, key));
+
+    try {
+      const topicList = await listKafkaTopics({ auth: activeRuntimeAuth });
+      setTopicRail((current) =>
+        markTopicLoadSucceeded(current, key, topicList.topics),
+      );
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "Topic list refresh failed";
+      setTopicRail((current) => markTopicLoadFailed(current, key, message));
+    }
+  }
+
+  function refreshTopicList() {
+    void loadTopicList(true);
+  }
+
+  function pinTopic(topic: string) {
+    setTopicRail((current) =>
+      toggleTopicPin(current, activeEnvironmentKey, topic, getTopicPinStore()),
     );
   }
 
@@ -127,31 +179,76 @@ function App() {
         </header>
         <section className="environment-summary">
           <span>Cluster</span>
-          <strong>localhost:9092</strong>
-          <small>{appState?.version ?? "Rust command pending"}</small>
+          <button
+            className="refresh-button"
+            type="button"
+            disabled={topicRail.status === "loading"}
+            onClick={refreshTopicList}
+          >
+            Refresh
+          </button>
+          <strong>{activeRuntimeAuth.brokers.join(", ")}</strong>
+          <small>
+            {topicRailStatus(topicRail.status, topicRail.topics.length)}
+          </small>
         </section>
+        <div className="topic-search">
+          <input
+            aria-label="Search topics"
+            placeholder="Search topics"
+            type="search"
+            value={topicRail.searchQuery}
+            onChange={(event) =>
+              setTopicRail((current) =>
+                setTopicSearch(current, event.currentTarget.value),
+              )
+            }
+          />
+        </div>
+        {topicRail.error ? (
+          <div className="error-strip compact">{topicRail.error}</div>
+        ) : null}
         <nav className="topic-list">
-          {topics.map((topic) => (
-            <button
-              className={[
-                "topic",
-                topic.name === activeTopic ? "active" : "",
-                topic.pinned ? "pinned" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              key={topic.name}
-              type="button"
-              onClick={() => selectTopic(topic.name)}
-            >
-              <span className="topic-marker" />
-              <span>
-                <strong>{topic.name}</strong>
-                <small>{topic.partitions} partitions / lag {topic.lag}</small>
-              </span>
-              <span className="topic-mode">{topic.pinned ? "PIN" : "JSON"}</span>
-            </button>
-          ))}
+          {topicRows.length === 0 ? (
+            <p className="topic-empty">
+              {topicRail.status === "loading" ? "Loading topics" : "No topics"}
+            </p>
+          ) : (
+            topicRows.map((topic) => (
+              <div
+                className={[
+                  "topic",
+                  topic.name === activeTopic ? "active" : "",
+                  topic.pinned ? "pinned" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                key={topic.name}
+              >
+                <button
+                  className="topic-select"
+                  type="button"
+                  onClick={() => selectTopic(topic.name)}
+                >
+                  <span className="topic-marker" />
+                  <span>
+                    <strong>{topic.name}</strong>
+                    <small>{topic.partitionCount} partitions</small>
+                  </span>
+                  <span className="topic-mode">JSON</span>
+                </button>
+                <button
+                  className="topic-pin"
+                  type="button"
+                  aria-label={`${topic.pinned ? "Unpin" : "Pin"} ${topic.name}`}
+                  aria-pressed={topic.pinned}
+                  onClick={() => pinTopic(topic.name)}
+                >
+                  <span />
+                </button>
+              </div>
+            ))
+          )}
         </nav>
       </aside>
 
@@ -409,6 +506,22 @@ function formatLayout(layout: string) {
   }
 
   return "1 pane";
+}
+
+function topicRailStatus(status: string, topicCount: number) {
+  if (status === "loading") {
+    return "Listing topics";
+  }
+
+  if (status === "error") {
+    return "Topic list unavailable";
+  }
+
+  return `${topicCount} topics / manual refresh`;
+}
+
+function getTopicPinStore(): TopicPinStore | undefined {
+  return typeof window === "undefined" ? undefined : window.localStorage;
 }
 
 function stopEvent(action: () => void) {
