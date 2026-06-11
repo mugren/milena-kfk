@@ -67,12 +67,102 @@ pub struct SavedEnvironment {
     pub password_secret_ref: String,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeAuthConfig {
     pub environment: String,
     pub brokers: Vec<String>,
     pub properties: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ListKafkaTopicsRequest {
+    pub auth: RuntimeAuthConfig,
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaTopicList {
+    pub topics: Vec<KafkaTopicMetadata>,
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaTopicMetadata {
+    pub name: String,
+    pub partition_count: i32,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishKafkaRecordRequest {
+    pub auth: RuntimeAuthConfig,
+    pub topic: String,
+    pub key: Option<String>,
+    pub payload: String,
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishKafkaRecordResponse {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+    pub status: String,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StartKafkaConsumerSessionRequest {
+    pub auth: RuntimeAuthConfig,
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub from_beginning: bool,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StopKafkaConsumerSessionRequest {
+    pub session_id: String,
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerSession {
+    pub session_id: String,
+    pub group_id: String,
+    pub topics: Vec<String>,
+    pub status: String,
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StopKafkaConsumerSessionResponse {
+    pub session_id: String,
+    pub group_id: String,
+    pub status: String,
+    pub cleanup: KafkaConsumerGroupCleanupAttempt,
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupCleanupAttempt {
+    pub group_id: String,
+    pub attempted: bool,
+    pub succeeded: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaRecordEvent {
+    pub session_id: String,
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+    pub key: Option<String>,
+    pub payload: Option<String>,
 }
 
 #[derive(Clone, Serialize, PartialEq, Eq, Debug)]
@@ -91,6 +181,22 @@ pub enum MilenaBoundaryEvent {
     BoundaryReady {
         session_id: String,
         capabilities: Vec<MilenaCapability>,
+    },
+    KafkaConsumerStarted {
+        session_id: String,
+        group_id: String,
+        topics: Vec<String>,
+    },
+    KafkaRecord {
+        record: KafkaRecordEvent,
+    },
+    KafkaConsumerError {
+        session_id: String,
+        message: String,
+    },
+    KafkaConsumerStopped {
+        session_id: String,
+        group_id: String,
     },
 }
 
@@ -187,6 +293,34 @@ impl MilenaCommandError {
             message: cause.to_string(),
         }
     }
+
+    pub fn kafka_auth_unsupported(cause: impl ToString) -> Self {
+        Self {
+            code: MilenaCommandErrorCode::KafkaAuthUnsupported,
+            message: cause.to_string(),
+        }
+    }
+
+    pub fn kafka_operation_failed(cause: impl ToString) -> Self {
+        Self {
+            code: MilenaCommandErrorCode::KafkaOperationFailed,
+            message: cause.to_string(),
+        }
+    }
+
+    pub fn kafka_session_not_found(session_id: impl ToString) -> Self {
+        Self {
+            code: MilenaCommandErrorCode::KafkaSessionNotFound,
+            message: format!("Kafka consumer session '{}' was not found", session_id.to_string()),
+        }
+    }
+
+    pub fn kafka_payload_required() -> Self {
+        Self {
+            code: MilenaCommandErrorCode::KafkaPayloadRequired,
+            message: "payload is required".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, PartialEq, Eq, Debug)]
@@ -204,4 +338,8 @@ pub enum MilenaCommandErrorCode {
     EnvironmentSecretStoreFailed,
     EnvironmentSecretMissing,
     EnvironmentAuthTemplateInvalid,
+    KafkaAuthUnsupported,
+    KafkaOperationFailed,
+    KafkaSessionNotFound,
+    KafkaPayloadRequired,
 }

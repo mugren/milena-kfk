@@ -26,7 +26,21 @@ export type TopicSessionPreview = {
 
 export type MilenaCommandErrorCode =
   | "topic-required"
-  | "event-delivery-failed";
+  | "event-delivery-failed"
+  | "environment-name-required"
+  | "environment-brokers-required"
+  | "environment-username-required"
+  | "environment-password-required"
+  | "environment-auth-template-required"
+  | "environment-not-found"
+  | "environment-storage-failed"
+  | "environment-secret-store-failed"
+  | "environment-secret-missing"
+  | "environment-auth-template-invalid"
+  | "kafka-auth-unsupported"
+  | "kafka-operation-failed"
+  | "kafka-session-not-found"
+  | "kafka-payload-required";
 
 export type MilenaCommandError = {
   code: MilenaCommandErrorCode;
@@ -48,7 +62,124 @@ export type MilenaBoundaryEvent =
         sessionId: string;
         capabilities: MilenaCapability[];
       };
+    }
+  | {
+      event: "kafkaConsumerStarted";
+      data: {
+        sessionId: string;
+        groupId: string;
+        topics: string[];
+      };
+    }
+  | {
+      event: "kafkaRecord";
+      data: {
+        record: KafkaRecordEvent;
+      };
+    }
+  | {
+      event: "kafkaConsumerError";
+      data: {
+        sessionId: string;
+        message: string;
+      };
+    }
+  | {
+      event: "kafkaConsumerStopped";
+      data: {
+        sessionId: string;
+        groupId: string;
+      };
     };
+
+export type SaveEnvironmentRequest = {
+  name: string;
+  brokers: string[];
+  username: string;
+  password: string;
+  authPropertiesTemplate: string;
+};
+
+export type SavedEnvironment = {
+  name: string;
+  brokers: string[];
+  username: string;
+  authPropertiesTemplate: string;
+  passwordSecretRef: string;
+};
+
+export type RuntimeAuthConfig = {
+  environment: string;
+  brokers: string[];
+  properties: Record<string, string>;
+};
+
+export type KafkaTopicMetadata = {
+  name: string;
+  partitionCount: number;
+};
+
+export type KafkaTopicList = {
+  topics: KafkaTopicMetadata[];
+};
+
+export type ListKafkaTopicsRequest = {
+  auth: RuntimeAuthConfig;
+};
+
+export type PublishKafkaRecordRequest = {
+  auth: RuntimeAuthConfig;
+  topic: string;
+  key?: string | null;
+  payload: string;
+};
+
+export type PublishKafkaRecordResponse = {
+  topic: string;
+  partition: number;
+  offset: number;
+  status: string;
+};
+
+export type StartKafkaConsumerSessionRequest = {
+  auth: RuntimeAuthConfig;
+  topics: string[];
+  fromBeginning?: boolean;
+};
+
+export type StopKafkaConsumerSessionRequest = {
+  sessionId: string;
+};
+
+export type KafkaConsumerSession = {
+  sessionId: string;
+  groupId: string;
+  topics: string[];
+  status: string;
+};
+
+export type KafkaConsumerGroupCleanupAttempt = {
+  groupId: string;
+  attempted: boolean;
+  succeeded: boolean;
+  error?: string | null;
+};
+
+export type StopKafkaConsumerSessionResponse = {
+  sessionId: string;
+  groupId: string;
+  status: string;
+  cleanup: KafkaConsumerGroupCleanupAttempt;
+};
+
+export type KafkaRecordEvent = {
+  sessionId: string;
+  topic: string;
+  partition: number;
+  offset: number;
+  key?: string | null;
+  payload?: string | null;
+};
 
 export async function loadAppState(): Promise<AppState> {
   return invoke<AppState>("get_app_state");
@@ -64,5 +195,44 @@ export async function previewTopicSession(
   return invoke<TopicSessionPreview>("preview_topic_session", {
     request,
     onEvent: eventChannel,
+  });
+}
+
+export async function saveEnvironment(
+  request: SaveEnvironmentRequest,
+): Promise<SavedEnvironment> {
+  return invoke<SavedEnvironment>("save_environment", { request });
+}
+
+export async function listKafkaTopics(
+  request: ListKafkaTopicsRequest,
+): Promise<KafkaTopicList> {
+  return invoke<KafkaTopicList>("list_kafka_topics", { request });
+}
+
+export async function publishKafkaRecord(
+  request: PublishKafkaRecordRequest,
+): Promise<PublishKafkaRecordResponse> {
+  return invoke<PublishKafkaRecordResponse>("publish_kafka_record", { request });
+}
+
+export async function startKafkaConsumerSession(
+  request: StartKafkaConsumerSessionRequest,
+  onEvent: (event: MilenaBoundaryEvent) => void,
+): Promise<KafkaConsumerSession> {
+  const eventChannel = new Channel<MilenaBoundaryEvent>();
+  eventChannel.onmessage = onEvent;
+
+  return invoke<KafkaConsumerSession>("start_kafka_consumer_session", {
+    request,
+    onEvent: eventChannel,
+  });
+}
+
+export async function stopKafkaConsumerSession(
+  request: StopKafkaConsumerSessionRequest,
+): Promise<StopKafkaConsumerSessionResponse> {
+  return invoke<StopKafkaConsumerSessionResponse>("stop_kafka_consumer_session", {
+    request,
   });
 }

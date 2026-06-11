@@ -1,9 +1,13 @@
 use tauri::ipc::Channel;
 
 use crate::contracts::{
-    AppState, CommandResult, MilenaBoundaryEvent, MilenaCommandError, TopicSessionMode,
+    AppState, CommandResult, KafkaConsumerSession, KafkaTopicList, ListKafkaTopicsRequest,
+    MilenaBoundaryEvent, MilenaCommandError, PublishKafkaRecordRequest,
+    PublishKafkaRecordResponse, StartKafkaConsumerSessionRequest,
+    StopKafkaConsumerSessionRequest, StopKafkaConsumerSessionResponse, TopicSessionMode,
     TopicSessionPreview, TopicSessionPreviewRequest, CAPABILITIES,
 };
+use crate::kafka_adapter::KafkaAdapter;
 
 pub trait BoundaryEventEmitter {
     fn emit(&self, event: MilenaBoundaryEvent) -> CommandResult<()>;
@@ -43,6 +47,40 @@ pub fn preview_topic_session(
     })?;
 
     Ok(preview)
+}
+
+pub fn list_kafka_topics(
+    request: ListKafkaTopicsRequest,
+    adapter: &impl KafkaAdapter,
+) -> CommandResult<KafkaTopicList> {
+    Ok(KafkaTopicList {
+        topics: adapter.list_topics(&request.auth)?,
+    })
+}
+
+pub fn publish_kafka_record(
+    request: PublishKafkaRecordRequest,
+    adapter: &impl KafkaAdapter,
+) -> CommandResult<PublishKafkaRecordResponse> {
+    adapter.publish_record(&request)
+}
+
+pub fn start_kafka_consumer_session<E>(
+    request: StartKafkaConsumerSessionRequest,
+    event_emitter: E,
+    adapter: &impl KafkaAdapter,
+) -> CommandResult<KafkaConsumerSession>
+where
+    E: BoundaryEventEmitter + Send + Sync + 'static,
+{
+    adapter.start_consumer_session(request, event_emitter)
+}
+
+pub fn stop_kafka_consumer_session(
+    request: StopKafkaConsumerSessionRequest,
+    adapter: &impl KafkaAdapter,
+) -> CommandResult<StopKafkaConsumerSessionResponse> {
+    adapter.stop_consumer_session(request)
 }
 
 fn build_topic_session_preview(
