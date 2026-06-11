@@ -7,7 +7,13 @@ import {
   listKafkaTopics,
   loadAppState,
   previewTopicSession,
+  startKafkaConsumerSession,
+  stopKafkaConsumerSession,
 } from "./lib/tauri";
+import {
+  startPanePollingSession,
+  stopPanePollingSession,
+} from "./lib/polling";
 import {
   createInitialTopicRailState,
   environmentKey,
@@ -32,15 +38,21 @@ import {
   markPaneReady,
   selectPane as selectWorkspacePane,
   splitPane as splitWorkspacePane,
-  stopPane as stopWorkspacePane,
   type SplitDirection,
   type WorkspacePane,
+  type WorkspaceState,
 } from "./lib/workspace";
 
 type ActivityEntry = MilenaBoundaryEvent & {
   paneId: number;
   time: string;
 };
+
+type TopicMenuState = {
+  topic: string;
+  x: number;
+  y: number;
+} | null;
 
 const activeRuntimeAuth: RuntimeAuthConfig = {
   environment: "local-dev",
@@ -61,7 +73,10 @@ function App() {
   );
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [appError, setAppError] = useState<string | null>(null);
+  const [topicMenu, setTopicMenu] = useState<TopicMenuState>(null);
   const requestedTopicLoads = useRef(new Set<string>());
+  const workspaceRef = useRef(workspace);
+  const pollingRuns = useRef(new Map<number, number>());
 
   useEffect(() => {
     loadAppState()
@@ -73,6 +88,27 @@ function App() {
       });
     void loadTopicList(false);
   }, []);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  useEffect(() => {
+    if (!topicMenu) {
+      return;
+    }
+
+    function closeTopicMenu() {
+      setTopicMenu(null);
+    }
+
+    window.addEventListener("click", closeTopicMenu);
+    window.addEventListener("keydown", closeTopicMenu);
+    return () => {
+      window.removeEventListener("click", closeTopicMenu);
+      window.removeEventListener("keydown", closeTopicMenu);
+    };
+  }, [topicMenu]);
 
   const activePane = useMemo(
     () => getSelectedPane(workspace),
@@ -93,7 +129,7 @@ function App() {
   }, [activeTopic, topicRail.topics]);
 
   function selectTopic(topic: string) {
-    setWorkspace((current) =>
+    updateWorkspace((current) =>
       assignTopicToPane(current, current.selectedPaneId, topic),
     );
   }
@@ -136,13 +172,13 @@ function App() {
       return;
     }
 
-    setWorkspace((current) => markPaneLoading(current, paneId, mode));
+    updateWorkspace((current) => markPaneLoading(current, paneId, mode));
 
     try {
       const nextSession = await previewTopicSession(
         { topic: pane.topic, mode },
         (event) => {
-          setWorkspace((current) => appendPaneActivity(current, paneId, event));
+          updateWorkspace((current) => appendPaneActivity(current, paneId, event));
           setActivity((current) =>
             [
               { ...event, paneId, time: new Date().toLocaleTimeString() },
@@ -151,20 +187,70 @@ function App() {
           );
         },
       );
-      setWorkspace((current) => markPaneReady(current, paneId, nextSession));
+      updateWorkspace((current) => markPaneReady(current, paneId, nextSession));
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "Command boundary failed";
-      setWorkspace((current) => markPaneError(current, paneId, message));
+      updateWorkspace((current) => markPaneError(current, paneId, message));
     }
   }
 
+  function startPolling(paneId: number, topic: string) {
+    const run = nextPollingRun(paneId);
+    setTopicMenu(null);
+    void startPanePollingSession({
+      paneId,
+      topic,
+      auth: activeRuntimeAuth,
+      getWorkspace: () => workspaceRef.current,
+      updateWorkspace,
+      startConsumerSession: startKafkaConsumerSession,
+      stopConsumerSession: stopKafkaConsumerSession,
+      isCurrent: () => pollingRuns.current.get(paneId) === run,
+      onEvent: (event) => {
+        setActivity((current) =>
+          [
+            { ...event, paneId, time: new Date().toLocaleTimeString() },
+            ...current,
+          ].slice(0, 10),
+        );
+      },
+      onStopError: setAppError,
+    });
+  }
+
   function splitPane(paneId: number, direction: SplitDirection) {
-    setWorkspace((current) => splitWorkspacePane(current, paneId, direction));
+    updateWorkspace((current) => splitWorkspacePane(current, paneId, direction));
   }
 
   function stopPane(paneId: number) {
-    setWorkspace((current) => stopWorkspacePane(current, paneId));
+    nextPollingRun(paneId);
+    void stopPanePollingSession({
+      paneId,
+      getWorkspace: () => workspaceRef.current,
+      updateWorkspace,
+      stopConsumerSession: stopKafkaConsumerSession,
+      onStopError: setAppError,
+    });
+  }
+
+  function updateWorkspace(update: (current: WorkspaceState) => WorkspaceState) {
+    setWorkspace((current) => {
+      const next = update(current);
+      workspaceRef.current = next;
+      return next;
+    });
+  }
+
+  function nextPollingRun(paneId: number) {
+    const next = (pollingRuns.current.get(paneId) ?? 0) + 1;
+    pollingRuns.current.set(paneId, next);
+    return next;
+  }
+
+  function openTopicMenu(event: MouseEvent<HTMLDivElement>, topic: string) {
+    event.preventDefault();
+    setTopicMenu({ topic, x: event.clientX, y: event.clientY });
   }
 
   return (
@@ -224,6 +310,7 @@ function App() {
                   .filter(Boolean)
                   .join(" ")}
                 key={topic.name}
+                onContextMenu={(event) => openTopicMenu(event, topic.name)}
               >
                 <button
                   className="topic-select"
@@ -263,7 +350,9 @@ function App() {
             <button
               type="button"
               disabled={!canStartPaneSession(activePane)}
-              onClick={() => activePane && openBoundary(activePane.id, "poll")}
+              onClick={() =>
+                activePane?.topic && startPolling(activePane.id, activePane.topic)
+              }
             >
               Poll
             </button>
@@ -286,9 +375,11 @@ function App() {
               active={pane.id === workspace.selectedPaneId}
               canSplit={workspace.panes.length < 4}
               onActivate={() => {
-                setWorkspace((current) => selectWorkspacePane(current, pane.id));
+                updateWorkspace((current) =>
+                  selectWorkspacePane(current, pane.id),
+                );
               }}
-              onPoll={() => openBoundary(pane.id, "poll")}
+              onPoll={() => pane.topic && startPolling(pane.id, pane.topic)}
               onPublish={() => openBoundary(pane.id, "publish")}
               onSplit={(direction) => splitPane(pane.id, direction)}
               onStop={() => stopPane(pane.id)}
@@ -352,6 +443,14 @@ function App() {
           )}
         </section>
       </aside>
+      {topicMenu ? (
+        <TopicContextMenu
+          menu={topicMenu}
+          panes={workspace.panes}
+          selectedPaneId={workspace.selectedPaneId}
+          onPoll={(paneId) => startPolling(paneId, topicMenu.topic)}
+        />
+      ) : null}
     </main>
   );
 }
@@ -479,9 +578,9 @@ function Pane({
             ) : (
               pane.activity.map((event, index) => (
                 <article className="message-row" key={`${event.event}-${index}`}>
-                  <span className="message-meta">p0 / offset {index}</span>
-                  <span className="topic-label">{pane.topic}</span>
-                  <code>{JSON.stringify(event.data)}</code>
+                  <span className="message-meta">{eventMeta(event)}</span>
+                  <span className="topic-label">{eventTopic(event, pane)}</span>
+                  <code>{eventPayload(event)}</code>
                 </article>
               ))
             )}
@@ -489,6 +588,42 @@ function Pane({
         </section>
       </div>
     </article>
+  );
+}
+
+function TopicContextMenu({
+  menu,
+  panes,
+  selectedPaneId,
+  onPoll,
+}: {
+  menu: NonNullable<TopicMenuState>;
+  panes: WorkspacePane[];
+  selectedPaneId: number;
+  onPoll: (paneId: number) => void;
+}) {
+  return (
+    <div
+      className="topic-menu"
+      role="menu"
+      style={{ left: menu.x, top: menu.y }}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <header>
+        <span className="eyebrow">Poll topic</span>
+        <strong>{menu.topic}</strong>
+      </header>
+      {panes.map((pane) => (
+        <button
+          key={pane.id}
+          type="button"
+          role="menuitem"
+          onClick={() => onPoll(pane.id)}
+        >
+          {pane.id === selectedPaneId ? "Selected pane" : `Pane ${pane.id}`}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -518,6 +653,35 @@ function topicRailStatus(status: string, topicCount: number) {
   }
 
   return `${topicCount} topics / manual refresh`;
+}
+
+function eventMeta(event: MilenaBoundaryEvent) {
+  if (event.event === "kafkaRecord") {
+    const record = event.data.record;
+    return `p${record.partition} / offset ${record.offset}`;
+  }
+
+  return event.event;
+}
+
+function eventTopic(event: MilenaBoundaryEvent, pane: WorkspacePane) {
+  if (event.event === "kafkaRecord") {
+    return event.data.record.topic;
+  }
+
+  if (event.event === "kafkaConsumerStarted") {
+    return event.data.topics.join(", ");
+  }
+
+  return pane.topic ?? "none";
+}
+
+function eventPayload(event: MilenaBoundaryEvent) {
+  if (event.event === "kafkaRecord") {
+    return event.data.record.payload ?? "";
+  }
+
+  return JSON.stringify(event.data);
 }
 
 function getTopicPinStore(): TopicPinStore | undefined {
