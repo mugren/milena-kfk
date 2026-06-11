@@ -1,34 +1,33 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import {
   AppState,
   MilenaBoundaryEvent,
-  TopicSessionPreview,
   TopicSessionPreviewRequest,
   loadAppState,
   previewTopicSession,
 } from "./lib/tauri";
-
-type BoundaryStatus = "idle" | "loading" | "ready" | "error";
-type PaneMode = "idle" | TopicSessionPreviewRequest["mode"];
-type PaneTone = "normal" | "warning" | "error";
+import {
+  appendPaneActivity,
+  assignTopicToPane,
+  canStartPaneSession,
+  createInitialWorkspaceState,
+  getSelectedPane,
+  isPaneEmpty,
+  markPaneError,
+  markPaneLoading,
+  markPaneReady,
+  selectPane as selectWorkspacePane,
+  splitPane as splitWorkspacePane,
+  stopPane as stopWorkspacePane,
+  type SplitDirection,
+  type WorkspacePane,
+} from "./lib/workspace";
 
 type Topic = {
   name: string;
   partitions: number;
   lag: number;
   pinned?: boolean;
-};
-
-type WorkspacePane = {
-  id: number;
-  topic: string;
-  consumerGroup: string;
-  mode: PaneMode;
-  status: BoundaryStatus;
-  session: TopicSessionPreview | null;
-  activity: MilenaBoundaryEvent[];
-  error: string | null;
-  tone: PaneTone;
 };
 
 type ActivityEntry = MilenaBoundaryEvent & {
@@ -45,11 +44,7 @@ const topics: Topic[] = [
 
 function App() {
   const [appState, setAppState] = useState<AppState | null>(null);
-  const [selectedTopic, setSelectedTopic] = useState(topics[0].name);
-  const [activePaneId, setActivePaneId] = useState(1);
-  const [panes, setPanes] = useState<WorkspacePane[]>([
-    createPane(1, topics[0].name),
-  ]);
+  const [workspace, setWorkspace] = useState(createInitialWorkspaceState);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [appError, setAppError] = useState<string | null>(null);
 
@@ -64,64 +59,38 @@ function App() {
   }, []);
 
   const activePane = useMemo(
-    () => panes.find((pane) => pane.id === activePaneId) ?? panes[0],
-    [activePaneId, panes],
+    () => getSelectedPane(workspace),
+    [workspace],
   );
 
+  const activeTopic = activePane?.topic ?? null;
+
   const selectedTopicMeta = useMemo(() => {
-    const selected = topics.find((topic) => topic.name === selectedTopic);
+    const selected = topics.find((topic) => topic.name === activeTopic);
     return selected
       ? `${selected.partitions} partitions / lag ${selected.lag} / JSON`
-      : "JSON / no active Kafka session";
-  }, [selectedTopic]);
-
-  function updatePane(
-    paneId: number,
-    update: Partial<WorkspacePane> | ((pane: WorkspacePane) => WorkspacePane),
-  ) {
-    setPanes((current) =>
-      current.map((pane) => {
-        if (pane.id !== paneId) {
-          return pane;
-        }
-
-        return typeof update === "function" ? update(pane) : { ...pane, ...update };
-      }),
-    );
-  }
+      : "No topic assigned / no active Kafka session";
+  }, [activeTopic]);
 
   function selectTopic(topic: string) {
-    setSelectedTopic(topic);
-    updatePane(activePaneId, (pane) =>
-      pane.status === "idle" && pane.activity.length === 0
-        ? { ...pane, topic }
-        : pane,
+    setWorkspace((current) =>
+      assignTopicToPane(current, current.selectedPaneId, topic),
     );
   }
 
   async function openBoundary(paneId: number, mode: TopicSessionPreviewRequest["mode"]) {
-    const pane = panes.find((candidate) => candidate.id === paneId);
-    if (!pane) {
+    const pane = workspace.panes.find((candidate) => candidate.id === paneId);
+    if (!canStartPaneSession(pane)) {
       return;
     }
 
-    setActivePaneId(paneId);
-    updatePane(paneId, {
-      mode,
-      status: "loading",
-      error: null,
-      activity: [],
-      tone: "normal",
-    });
+    setWorkspace((current) => markPaneLoading(current, paneId, mode));
 
     try {
       const nextSession = await previewTopicSession(
         { topic: pane.topic, mode },
         (event) => {
-          updatePane(paneId, (currentPane) => ({
-            ...currentPane,
-            activity: [event, ...currentPane.activity].slice(0, 6),
-          }));
+          setWorkspace((current) => appendPaneActivity(current, paneId, event));
           setActivity((current) =>
             [
               { ...event, paneId, time: new Date().toLocaleTimeString() },
@@ -130,38 +99,20 @@ function App() {
           );
         },
       );
-      updatePane(paneId, {
-        session: nextSession,
-        status: "ready",
-        mode: nextSession.mode,
-      });
+      setWorkspace((current) => markPaneReady(current, paneId, nextSession));
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "Command boundary failed";
-      updatePane(paneId, { error: message, status: "error", tone: "error" });
+      setWorkspace((current) => markPaneError(current, paneId, message));
     }
   }
 
-  function splitPane() {
-    if (panes.length >= 4) {
-      return;
-    }
-
-    const nextId = Math.max(...panes.map((pane) => pane.id)) + 1;
-    setPanes((current) => [...current, createPane(nextId, selectedTopic)]);
-    setActivePaneId(nextId);
+  function splitPane(paneId: number, direction: SplitDirection) {
+    setWorkspace((current) => splitWorkspacePane(current, paneId, direction));
   }
 
   function stopPane(paneId: number) {
-    updatePane(paneId, (pane) => ({
-      ...pane,
-      mode: "idle",
-      status: "idle",
-      session: null,
-      error: null,
-      activity: [],
-      tone: "normal",
-    }));
+    setWorkspace((current) => stopWorkspacePane(current, paneId));
   }
 
   return (
@@ -184,7 +135,7 @@ function App() {
             <button
               className={[
                 "topic",
-                topic.name === selectedTopic ? "active" : "",
+                topic.name === activeTopic ? "active" : "",
                 topic.pinned ? "pinned" : "",
               ]
                 .filter(Boolean)
@@ -208,12 +159,13 @@ function App() {
         <header className="workspace-header">
           <div>
             <span className="eyebrow">Workspace</span>
-            <h1>{selectedTopic}</h1>
+            <h1>{activeTopic ?? "Empty pane"}</h1>
             <p>{selectedTopicMeta}</p>
           </div>
           <div className="toolbar">
             <button
               type="button"
+              disabled={!canStartPaneSession(activePane)}
               onClick={() => activePane && openBoundary(activePane.id, "poll")}
             >
               Poll
@@ -221,6 +173,7 @@ function App() {
             <button
               className="primary"
               type="button"
+              disabled={!canStartPaneSession(activePane)}
               onClick={() => activePane && openBoundary(activePane.id, "publish")}
             >
               Send
@@ -228,20 +181,19 @@ function App() {
           </div>
         </header>
 
-        <section className="pane-grid" data-count={panes.length}>
-          {panes.map((pane) => (
+        <section className="pane-grid" data-layout={workspace.layout}>
+          {workspace.panes.map((pane) => (
             <Pane
               key={pane.id}
               pane={pane}
-              active={pane.id === activePaneId}
-              canSplit={panes.length < 4}
+              active={pane.id === workspace.selectedPaneId}
+              canSplit={workspace.panes.length < 4}
               onActivate={() => {
-                setActivePaneId(pane.id);
-                setSelectedTopic(pane.topic);
+                setWorkspace((current) => selectWorkspacePane(current, pane.id));
               }}
               onPoll={() => openBoundary(pane.id, "poll")}
               onPublish={() => openBoundary(pane.id, "publish")}
-              onSplit={splitPane}
+              onSplit={(direction) => splitPane(pane.id, direction)}
               onStop={() => stopPane(pane.id)}
             />
           ))}
@@ -261,7 +213,7 @@ function App() {
         <section className="pane-state">
           <div>
             <span>Topic</span>
-            <strong>{activePane?.topic ?? selectedTopic}</strong>
+            <strong>{activePane?.topic ?? "none"}</strong>
           </div>
           <div>
             <span>Group</span>
@@ -269,7 +221,7 @@ function App() {
           </div>
           <div>
             <span>Split</span>
-            <strong>{panes.length === 4 ? "2 x 2" : `${panes.length} pane`}</strong>
+            <strong>{formatLayout(workspace.layout)}</strong>
           </div>
         </section>
         {appError ? <div className="error-strip compact">{appError}</div> : null}
@@ -307,20 +259,6 @@ function App() {
   );
 }
 
-function createPane(id: number, topic: string): WorkspacePane {
-  return {
-    id,
-    topic,
-    consumerGroup: `milena-preview-${id}`,
-    mode: "idle",
-    status: "idle",
-    session: null,
-    activity: [],
-    error: null,
-    tone: "normal",
-  };
-}
-
 type PaneProps = {
   pane: WorkspacePane;
   active: boolean;
@@ -328,7 +266,7 @@ type PaneProps = {
   onActivate: () => void;
   onPoll: () => void;
   onPublish: () => void;
-  onSplit: () => void;
+  onSplit: (direction: SplitDirection) => void;
   onStop: () => void;
 };
 
@@ -342,29 +280,48 @@ function Pane({
   onSplit,
   onStop,
 }: PaneProps) {
+  const empty = isPaneEmpty(pane);
+  const canStart = canStartPaneSession(pane);
+
   return (
     <article
       className={[
         "pane",
         active ? "active" : "",
+        empty ? "is-empty" : "",
         pane.tone === "error" ? "has-error" : "",
       ]
         .filter(Boolean)
         .join(" ")}
+      aria-label={`Pane ${pane.id}`}
+      aria-current={active ? "true" : undefined}
       onClick={onActivate}
     >
       <header className="pane-header">
         <div>
           <span className="eyebrow">Pane {pane.id} / {pane.mode}</span>
-          <h2>{pane.topic}</h2>
-          <small>{pane.consumerGroup}</small>
+          <h2>{pane.topic ?? "Empty pane"}</h2>
+          <small>{pane.consumerGroup ?? "No consumer group"}</small>
         </div>
         <div className="pane-actions">
-          <button type="button" onClick={stopEvent(onPoll)}>
+          <button type="button" onClick={stopEvent(onPoll)} disabled={!canStart}>
             Poll
           </button>
-          <button type="button" onClick={stopEvent(onSplit)} disabled={!canSplit}>
-            Split
+          <button
+            type="button"
+            aria-label={`Split pane ${pane.id} right`}
+            onClick={stopEvent(() => onSplit("right"))}
+            disabled={!canSplit}
+          >
+            Split right
+          </button>
+          <button
+            type="button"
+            aria-label={`Split pane ${pane.id} top`}
+            onClick={stopEvent(() => onSplit("top"))}
+            disabled={!canSplit}
+          >
+            Split top
           </button>
           <button type="button" onClick={stopEvent(onStop)}>
             Stop
@@ -398,12 +355,17 @@ function Pane({
             </button>
           </header>
           <pre>{`{
-  "topic": "${pane.topic}",
+  "topic": ${pane.topic ? `"${pane.topic}"` : "null"},
   "key": "preview"
 }`}</pre>
           <div className="publisher-footer">
             <span>acks=all</span>
-            <button className="primary" type="button" onClick={stopEvent(onPublish)}>
+            <button
+              className="primary"
+              type="button"
+              onClick={stopEvent(onPublish)}
+              disabled={!canStart}
+            >
               Send
             </button>
           </div>
@@ -433,8 +395,24 @@ function Pane({
   );
 }
 
+function formatLayout(layout: string) {
+  if (layout === "quad") {
+    return "2 x 2";
+  }
+
+  if (layout === "two-top") {
+    return "2 panes / top";
+  }
+
+  if (layout === "two-right") {
+    return "2 panes / right";
+  }
+
+  return "1 pane";
+}
+
 function stopEvent(action: () => void) {
-  return (event: React.MouseEvent<HTMLButtonElement>) => {
+  return (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     action();
   };
