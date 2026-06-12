@@ -1,0 +1,6 @@
+{
+  "fixture": "issue-14-keyed-publish",
+  "eventType": "order.updated",
+  "orderId": "issue-14-keyed",
+  "status": "confirmed"
+}

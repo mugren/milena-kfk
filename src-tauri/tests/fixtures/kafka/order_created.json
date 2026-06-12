@@ -1,0 +1,7 @@
+{
+  "fixture": "issue-14-unkeyed-publish",
+  "eventType": "order.created",
+  "orderId": "issue-14-unkeyed",
+  "amount": 42.5,
+  "currency": "USD"
+}

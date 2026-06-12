@@ -1,0 +1,69 @@
+name: milena-kafka
+
+x-kafka-image: &kafka-image apache/kafka:3.9.1
+
+services:
+  kafka-certs:
+    image: *kafka-image
+    user: "0:0"
+    working_dir: /milena-kafka
+    entrypoint: ["/bin/bash", "/milena-kafka/scripts/create-certs.sh"]
+    volumes:
+      - ./docker/kafka:/milena-kafka
+
+  kafka:
+    image: *kafka-image
+    hostname: kafka
+    user: "0:0"
+    depends_on:
+      kafka-certs:
+        condition: service_completed_successfully
+    ports:
+      - "19092:9093"
+    environment:
+      KAFKA_CLUSTER_ID: KBlv4duVSf2k9QjoE9R4xA
+      KAFKA_ADMIN_PASSWORD: admin-secret
+      KAFKA_MILENA_PLAIN_PASSWORD: milena-plain-secret
+      KAFKA_MILENA_SCRAM_PASSWORD: milena-scram-secret
+      KAFKA_SSL_KEYSTORE_PASSWORD: milena-local-keystore
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: milena-local-truststore
+    entrypoint: ["/bin/bash", "/milena-kafka/scripts/start-kafka.sh"]
+    volumes:
+      - ./docker/kafka:/milena-kafka
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 --command-config /milena-kafka/config/clients/admin.plain.container.properties >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 20s
+
+  kafka-topics:
+    image: *kafka-image
+    user: "0:0"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/milena-kafka/scripts/create-topics.sh"]
+    volumes:
+      - ./docker/kafka:/milena-kafka
+
+  kafka-smoke:
+    image: *kafka-image
+    user: "0:0"
+    profiles: ["tools"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-topics:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "/milena-kafka/scripts/smoke.sh"]
+    volumes:
+      - ./docker/kafka:/milena-kafka
+
+volumes:
+  kafka-data:

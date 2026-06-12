@@ -1,0 +1,41 @@
+{
+  "name": "milena",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build --bundles app",
+    "kafka:up": "scripts/kafka-up",
+    "kafka:down": "scripts/kafka-down",
+    "kafka:reset": "scripts/kafka-reset",
+    "kafka:smoke": "scripts/kafka-smoke",
+    "kafka:test": "scripts/kafka-test",
+    "kafka:check": "scripts/kafka-check",
+    "e2e:scenarios": "node scripts/e2e-scenarios.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "lucide-react": "^1.18.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vitest": "^4.1.8"
+  }
+}
