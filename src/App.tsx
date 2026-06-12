@@ -379,11 +379,12 @@ function App() {
             placeholder="Search topics"
             type="search"
             value={topicRail.searchQuery}
-            onChange={(event) =>
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               setTopicRail((current) =>
-                setTopicSearch(current, event.currentTarget.value),
-              )
-            }
+                setTopicSearch(current, value),
+              );
+            }}
           />
         </div>
         {topicRail.error ? (
