@@ -66,6 +66,108 @@ describe("global activity log", () => {
 
     expect(entries.map((event) => event.message)).toEqual(["second"]);
   });
+
+  it("maps boundary events to consumer activity severity and detail", () => {
+    const cases: Array<{
+      event: MilenaBoundaryEvent;
+      message: string;
+      severity: "info" | "error";
+      detail: string;
+    }> = [
+      {
+        event: {
+          event: "boundaryOpened",
+          data: {
+            sessionId: "session-1",
+            topic: "orders.created",
+            mode: "poll",
+          },
+        },
+        message: "boundaryOpened",
+        severity: "info",
+        detail: "orders.created",
+      },
+      {
+        event: {
+          event: "boundaryReady",
+          data: {
+            sessionId: "session-1",
+            capabilities: ["command-boundary"],
+          },
+        },
+        message: "boundaryReady",
+        severity: "info",
+        detail: "session-1",
+      },
+      {
+        event: {
+          event: "kafkaConsumerStarted",
+          data: {
+            sessionId: "session-1",
+            groupId: "group-1",
+            topics: ["orders.created"],
+          },
+        },
+        message: "kafkaConsumerStarted",
+        severity: "info",
+        detail: "group-1",
+      },
+      {
+        event: record(7),
+        message: "kafkaRecord",
+        severity: "info",
+        detail: "orders.created p0 / 7",
+      },
+      {
+        event: {
+          event: "kafkaConsumerError",
+          data: {
+            sessionId: "session-1",
+            message: "consumer failed",
+          },
+        },
+        message: "kafkaConsumerError",
+        severity: "error",
+        detail: "consumer failed",
+      },
+      {
+        event: {
+          event: "kafkaConsumerStopped",
+          data: {
+            sessionId: "session-1",
+            groupId: "group-1",
+          },
+        },
+        message: "kafkaConsumerStopped",
+        severity: "info",
+        detail: "group-1",
+      },
+    ];
+
+    const entries = cases.map((activityCase, index) =>
+      appendBoundaryEventActivity([], activityCase.event, 3, {
+        nextId: () => `event-${index}`,
+      })[0],
+    );
+
+    expect(
+      entries.map(({ message, severity, source, detail, paneId }) => ({
+        message,
+        severity,
+        source,
+        detail,
+        paneId,
+      })),
+    ).toEqual(
+      cases.map(({ message, severity, detail }) => ({
+        message,
+        severity,
+        source: "consumer",
+        detail,
+        paneId: 3,
+      })),
+    );
+  });
 });
 
 function entry(id: string): GlobalActivityEntry {

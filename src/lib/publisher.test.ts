@@ -269,6 +269,121 @@ describe("publisher pane flow", () => {
       expect(request.request.key).toBeNull();
     }
   });
+
+  it("reuses a draft for the same topic and resets it for a new topic", () => {
+    const edited = setPublisherKey(
+      setPublisherPayload(
+        openPublisherPane(createInitialPublisherState(), 1, "orders.created"),
+        1,
+        "{\"id\":1}",
+      ),
+      1,
+      "order-1",
+    );
+    const sameTopic = openPublisherPane(edited, 1, "orders.created");
+    const newTopic = openPublisherPane(sameTopic, 1, "payments.authorized");
+
+    expect(getPublisherPaneState(sameTopic, 1, "orders.created")).toMatchObject({
+      topic: "orders.created",
+      key: "order-1",
+      payload: "{\"id\":1}",
+    });
+    expect(getPublisherPaneState(newTopic, 1, "payments.authorized")).toMatchObject({
+      topic: "payments.authorized",
+      key: "",
+      status: "idle",
+      error: null,
+      ack: null,
+    });
+    expect(
+      getPublisherPaneState(newTopic, 1, "payments.authorized").payload,
+    ).toContain('"topic": "payments.authorized"');
+  });
+
+  it("blocks publish requests until polling is ready", async () => {
+    const workspace = workspaceStore(
+      markPanePollingStarting(createInitialWorkspaceState(), 1, "orders.created"),
+    );
+    const publisher = publisherStore(
+      setPublisherPayload(
+        openPublisherPane(createInitialPublisherState(), 1, "orders.created"),
+        1,
+        "{\"id\":1}",
+      ),
+    );
+    const publishRecord = vi.fn<PublishRecord>();
+
+    const result = await sendPublisherRecord({
+      paneId: 1,
+      auth,
+      ...workspace,
+      ...publisher,
+      publishRecord,
+    });
+
+    const draft = getPublisherPaneState(
+      publisher.getPublisherState(),
+      1,
+      "orders.created",
+    );
+
+    expect(result).toBeNull();
+    expect(publishRecord).not.toHaveBeenCalled();
+    expect(canSendPublisherRecord(workspace.getWorkspace().panes[0], draft)).toBe(
+      false,
+    );
+    expect(draft).toMatchObject({
+      status: "error",
+      error: "Start polling before publishing",
+      ack: null,
+    });
+  });
+
+  it("keeps the last producer ack visible after draft edits", async () => {
+    const workspace = workspaceStore(readyWorkspace());
+    const publisher = publisherStore(
+      setPublisherPayload(
+        openPublisherPane(createInitialPublisherState(), 1, "orders.created"),
+        1,
+        "{\"id\":1}",
+      ),
+    );
+    const publishRecord = vi.fn<PublishRecord>().mockResolvedValue({
+      topic: "orders.created",
+      partition: 0,
+      offset: 7,
+      status: "delivered",
+    });
+
+    await sendPublisherRecord({
+      paneId: 1,
+      auth,
+      ...workspace,
+      ...publisher,
+      publishRecord,
+      now: () => new Date("2026-06-12T12:00:00.000Z"),
+    });
+
+    publisher.updatePublisherState((current) =>
+      setPublisherPayload(current, 1, "{\"id\":2}", "orders.created"),
+    );
+
+    const edited = getPublisherPaneState(
+      publisher.getPublisherState(),
+      1,
+      "orders.created",
+    );
+
+    expect(edited.payload).toBe("{\"id\":2}");
+    expect(edited.status).toBe("delivered");
+    expect(edited.ack).toMatchObject({
+      topic: "orders.created",
+      partition: 0,
+      offset: 7,
+      status: "delivered",
+      sentAt: "2026-06-12T12:00:00.000Z",
+    });
+  });
 });
 
 function workspaceStore(initial: WorkspaceState) {

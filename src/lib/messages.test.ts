@@ -31,6 +31,22 @@ describe("message rendering", () => {
     expect(rendered.payload.marker).toBe("invalid JSON");
   });
 
+  it("renders raw mode without JSON parsing or invalid markers", () => {
+    const rendered = renderKafkaRecord(
+      record({ payload: "{\"id\":" }),
+      { mode: "raw" },
+    );
+
+    expect(rendered.payload).toMatchObject({
+      mode: "raw",
+      format: "raw",
+      preview: "{\"id\":",
+      content: "{\"id\":",
+      invalidJson: false,
+      marker: null,
+    });
+  });
+
   it("uses persisted raw mode preference per environment and topic", () => {
     const store = memoryStore();
     const preferences = setTopicMessageRenderMode(
@@ -54,6 +70,36 @@ describe("message rendering", () => {
     expect(store.getItem(MESSAGE_RENDER_PREFERENCES_KEY)).toContain(
       "orders.created",
     );
+  });
+
+  it("recovers from malformed render preference storage", () => {
+    const malformed = readMessageRenderPreferences(
+      memoryStore({ [MESSAGE_RENDER_PREFERENCES_KEY]: "not json" }),
+    );
+
+    expect(malformed).toEqual({});
+  });
+
+  it("prunes invalid render modes from stored preferences", () => {
+    const restored = readMessageRenderPreferences(
+      memoryStore({
+        [MESSAGE_RENDER_PREFERENCES_KEY]: JSON.stringify({
+          local: {
+            "orders.created": "raw",
+            "payments.authorized": "xml",
+            "inventory.adjusted": "json",
+          },
+          staging: "raw",
+        }),
+      }),
+    );
+
+    expect(restored).toEqual({
+      local: {
+        "orders.created": "raw",
+        "inventory.adjusted": "json",
+      },
+    });
   });
 
   it("renders expanded rows with full payload and headers", () => {
@@ -122,6 +168,28 @@ describe("message rendering", () => {
     if (stamped.event === "kafkaRecord") {
       expect(stamped.data.record.receivedAt).toBe(
         "2026-06-12T12:34:56.000Z",
+      );
+    }
+  });
+
+  it("preserves existing receivedAt values on Kafka record events", () => {
+    const event: MilenaBoundaryEvent = {
+      event: "kafkaRecord",
+      data: {
+        record: record({
+          receivedAt: "2026-06-12T10:00:00.000Z",
+        }),
+      },
+    };
+    const stamped = stampKafkaRecordReceivedAt(
+      event,
+      new Date("2026-06-12T12:34:56.000Z"),
+    );
+
+    expect(stamped).toBe(event);
+    if (stamped.event === "kafkaRecord") {
+      expect(stamped.data.record.receivedAt).toBe(
+        "2026-06-12T10:00:00.000Z",
       );
     }
   });

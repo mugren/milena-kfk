@@ -7,12 +7,19 @@ import {
   getSelectedPane,
   isPaneEmpty,
   markPaneLoading,
+  markPaneError,
+  markPanePollingStarted,
+  markPanePollingStarting,
   markPaneReady,
   selectPane,
   splitPane,
   stopPane,
 } from "./workspace";
-import type { MilenaBoundaryEvent, TopicSessionPreview } from "./tauri";
+import type {
+  KafkaConsumerSession,
+  MilenaBoundaryEvent,
+  TopicSessionPreview,
+} from "./tauri";
 
 const event: MilenaBoundaryEvent = {
   event: "boundaryOpened",
@@ -128,4 +135,95 @@ describe("workspace state", () => {
     expect(pane?.session).toBeNull();
     expect(pane?.activity).toEqual([]);
   });
+
+  it("rejects pane events while idle and from stale sessions", () => {
+    const idle = appendPaneActivity(createInitialWorkspaceState(), 1, event);
+    const ready = markPanePollingStarted(
+      markPanePollingStarting(
+        createInitialWorkspaceState(),
+        1,
+        "orders.created",
+      ),
+      1,
+      consumerSession("session-1", "group-1", "orders.created"),
+    );
+    const stale = appendPaneActivity(ready, 1, {
+      event: "kafkaRecord",
+      data: {
+        record: {
+          sessionId: "session-2",
+          topic: "orders.created",
+          partition: 0,
+          offset: 12,
+          key: null,
+          payload: "{\"offset\":12}",
+        },
+      },
+    });
+
+    expect(idle.panes[0].activity).toEqual([]);
+    expect(stale.panes[0].activity).toEqual([]);
+  });
+
+  it("resets pane session state when a new poll starts", () => {
+    const active = markPaneError(
+      appendPaneActivity(
+        markPanePollingStarted(
+          markPanePollingStarting(
+            createInitialWorkspaceState(),
+            1,
+            "orders.created",
+          ),
+          1,
+          consumerSession("session-1", "group-1", "orders.created"),
+        ),
+        1,
+        {
+          event: "kafkaRecord",
+          data: {
+            record: {
+              sessionId: "session-1",
+              topic: "orders.created",
+              partition: 0,
+              offset: 4,
+              key: null,
+              payload: "{\"offset\":4}",
+            },
+          },
+        },
+      ),
+      1,
+      "consumer stalled",
+    );
+
+    const restarting = markPanePollingStarting(
+      active,
+      1,
+      "payments.authorized",
+    );
+
+    expect(restarting.panes[0]).toMatchObject({
+      topic: "payments.authorized",
+      consumerGroup: null,
+      mode: "poll",
+      status: "loading",
+      session: null,
+      activity: [],
+      error: null,
+      tone: "normal",
+    });
+  });
 });
+
+function consumerSession(
+  sessionId: string,
+  groupId: string,
+  topic: string,
+): KafkaConsumerSession {
+  return {
+    sessionId,
+    groupId,
+    topics: [topic],
+    status: "started",
+  };
+}

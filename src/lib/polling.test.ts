@@ -244,6 +244,83 @@ describe("pane polling sessions", () => {
       session: null,
     });
   });
+
+  it("replaces an existing session before starting a new poll", async () => {
+    const store = workspaceStore(
+      markPanePollingStarted(
+        markPanePollingStarting(
+          createInitialWorkspaceState(),
+          1,
+          "orders.created",
+        ),
+        1,
+        session("session-1", "group-1", "orders.created"),
+      ),
+    );
+    const onStopError = vi.fn();
+    const stopConsumerSession = vi
+      .fn<StopConsumerSession>()
+      .mockRejectedValue(new Error("cleanup timeout"));
+    const startConsumerSession = vi
+      .fn<StartConsumerSession>()
+      .mockResolvedValue(session("session-2", "group-2", "payments.authorized"));
+
+    const started = await startPanePollingSession({
+      paneId: 1,
+      topic: "payments.authorized",
+      auth,
+      ...store,
+      startConsumerSession,
+      stopConsumerSession,
+      onStopError,
+    });
+
+    expect(stopConsumerSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+    });
+    expect(onStopError).toHaveBeenCalledWith("cleanup timeout");
+    expect(started?.sessionId).toBe("session-2");
+    expect(store.getWorkspace().panes[0]).toMatchObject({
+      topic: "payments.authorized",
+      consumerGroup: "group-2",
+      status: "ready",
+    });
+  });
+
+  it("cancels stale async starts through isCurrent and cleans up the new session", async () => {
+    const store = workspaceStore(createInitialWorkspaceState());
+    let current = true;
+    const stopConsumerSession = vi
+      .fn<StopConsumerSession>()
+      .mockResolvedValue(stopped("session-1", "group-1"));
+    const startConsumerSession = vi
+      .fn<StartConsumerSession>()
+      .mockImplementation(async () => {
+        current = false;
+        return session("session-1", "group-1", "orders.created");
+      });
+
+    const started = await startPanePollingSession({
+      paneId: 1,
+      topic: "orders.created",
+      auth,
+      ...store,
+      startConsumerSession,
+      stopConsumerSession,
+      isCurrent: () => current,
+    });
+
+    expect(started).toBeNull();
+    expect(stopConsumerSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+    });
+    expect(store.getWorkspace().panes[0]).toMatchObject({
+      topic: "orders.created",
+      status: "loading",
+      session: null,
+      consumerGroup: null,
+    });
+  });
 });
 
 function workspaceStore(initial: WorkspaceState) {
