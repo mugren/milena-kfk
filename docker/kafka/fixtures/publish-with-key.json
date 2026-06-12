@@ -1,0 +1,9 @@
+{
+  "eventType": "issue14.publish.with_key",
+  "source": "milena-local-kafka",
+  "sequence": 2,
+  "payload": {
+    "validJson": true,
+    "keyExpected": true
+  }
+}

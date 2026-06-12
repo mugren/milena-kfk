@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/kafka-lib.sh"
+
+info "resetting local Kafka integration broker and deleting compose volumes"
+compose down --volumes --remove-orphans
+compose up -d --wait
+
+info "reset complete"
+info "run smoke checks with: npm run kafka:smoke"

@@ -1,0 +1,8 @@
+{
+  "eventType": "issue14.error_path.valid_json",
+  "source": "milena-local-kafka",
+  "sequence": 4,
+  "payload": {
+    "purpose": "Use with bad credentials, unavailable broker, or missing topic validation."
+  }
+}

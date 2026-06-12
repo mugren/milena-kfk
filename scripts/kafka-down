@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/kafka-lib.sh"
+
+info "stopping local Kafka integration broker"
+compose down --remove-orphans

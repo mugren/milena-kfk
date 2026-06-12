@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/kafka-lib.sh"
+
+info "starting local Kafka integration broker from $KAFKA_COMPOSE_FILE"
+compose up -d --wait
+
+info "broker compose project: $KAFKA_PROJECT_NAME"
+info "app bootstrap brokers: $KAFKA_APP_BROKERS"
+info "run smoke checks with: npm run kafka:smoke"

@@ -43,6 +43,17 @@ cd src-tauri
 cargo test
 ```
 
+Run the local Kafka integration broker and issue #14 verification checks:
+
+```sh
+npm run kafka:up
+npm run kafka:smoke
+```
+
+See [docs/kafka-integration.md](docs/kafka-integration.md) for the full local
+broker runbook, auth profiles, Rust integration test env vars, and cleanup
+commands.
+
 This scaffold intentionally does not include signing, notarization, Windows, or
 Linux packaging work. The Rust command boundary currently exposes a minimal
 typed preview session and event channel only; Kafka behavior belongs to later

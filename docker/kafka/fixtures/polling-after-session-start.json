@@ -1,0 +1,8 @@
+{
+  "eventType": "issue14.polling.after_session_start",
+  "source": "milena-local-kafka",
+  "sequence": 3,
+  "payload": {
+    "expectedWithAutoOffsetReset": "latest"
+  }
+}

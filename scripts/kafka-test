@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/kafka-lib.sh"
+
+credentials_for_profile "${1:-}"
+
+export MILENA_KAFKA_INTEGRATION="${MILENA_KAFKA_INTEGRATION:-1}"
+export MILENA_KAFKA_BROKERS="$KAFKA_APP_BROKERS"
+export MILENA_KAFKA_TOPIC="$KAFKA_TOPIC"
+export MILENA_KAFKA_SECURITY_PROTOCOL="${MILENA_KAFKA_SECURITY_PROTOCOL:-SASL_SSL}"
+export MILENA_KAFKA_SASL_MECHANISM="$KAFKA_SASL_MECHANISM"
+export MILENA_KAFKA_USERNAME="$KAFKA_USERNAME"
+export MILENA_KAFKA_PASSWORD="$KAFKA_PASSWORD"
+export MILENA_KAFKA_SSL_CA_LOCATION="${MILENA_KAFKA_SSL_CA_LOCATION:-$ROOT_DIR/docker/kafka/generated/ssl/ca.crt}"
+
+if [[ ! -f "$ROOT_DIR/src-tauri/tests/kafka_integration.rs" ]]; then
+  die "src-tauri/tests/kafka_integration.rs is not present yet; run npm run kafka:smoke for broker validation"
+fi
+
+info "running Rust Kafka integration tests against $MILENA_KAFKA_BROKERS using $MILENA_KAFKA_SASL_MECHANISM"
+(cd "$ROOT_DIR/src-tauri" && cargo test --test kafka_integration -- --nocapture)

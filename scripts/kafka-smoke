@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/kafka-lib.sh"
+
+profile="${1:-}"
+
+if [[ -z "$profile" || "$profile" == "all" ]]; then
+  info "running compose-side Kafka smoke checks for PLAIN and SCRAM"
+  compose --profile tools run --rm kafka-smoke
+  exit 0
+fi
+
+credentials_for_profile "$profile"
+
+fixture="${MILENA_KAFKA_FIXTURE:-$ROOT_DIR/scripts/kafka-fixtures/order-created.json}"
+[[ -f "$fixture" ]] || die "missing fixture payload: $fixture"
+
+case "$profile" in
+  plain | PLAIN)
+    remote_config="${MILENA_KAFKA_CLIENT_CONFIG:-/milena-kafka/config/clients/milena.plain.container.properties}"
+    ;;
+  scram | SCRAM | SCRAM-SHA-512)
+    remote_config="${MILENA_KAFKA_CLIENT_CONFIG:-/milena-kafka/config/clients/milena.scram.container.properties}"
+    ;;
+esac
+group_id="milena-smoke-$(date +%s)"
+
+topics_bin="$(kafka_cli_path kafka-topics.sh)"
+producer_bin="$(kafka_cli_path kafka-console-producer.sh)"
+consumer_bin="$(kafka_cli_path kafka-console-consumer.sh)"
+groups_bin="$(kafka_cli_path kafka-consumer-groups.sh)"
+
+info "creating/verifying topic $KAFKA_TOPIC through $KAFKA_SASL_MECHANISM"
+compose exec -T "$KAFKA_SERVICE" "$topics_bin" \
+  --bootstrap-server "$KAFKA_SMOKE_BROKERS" \
+  --command-config "$remote_config" \
+  --create \
+  --if-not-exists \
+  --topic "$KAFKA_TOPIC" \
+  --partitions 1 \
+  --replication-factor 1
+
+info "listing non-internal topics"
+compose exec -T "$KAFKA_SERVICE" "$topics_bin" \
+  --bootstrap-server "$KAFKA_SMOKE_BROKERS" \
+  --command-config "$remote_config" \
+  --list
+
+info "producing fixture payload from $(basename "$fixture")"
+compose exec -T "$KAFKA_SERVICE" "$producer_bin" \
+  --bootstrap-server "$KAFKA_SMOKE_BROKERS" \
+  --producer.config "$remote_config" \
+  --topic "$KAFKA_TOPIC" < "$fixture"
+
+info "consuming one record with temporary group $group_id"
+compose exec -T "$KAFKA_SERVICE" "$consumer_bin" \
+  --bootstrap-server "$KAFKA_SMOKE_BROKERS" \
+  --consumer.config "$remote_config" \
+  --topic "$KAFKA_TOPIC" \
+  --group "$group_id" \
+  --from-beginning \
+  --max-messages 1 \
+  --timeout-ms 10000
+
+info "deleting temporary consumer group $group_id"
+compose exec -T "$KAFKA_SERVICE" "$groups_bin" \
+  --bootstrap-server "$KAFKA_SMOKE_BROKERS" \
+  --command-config "$remote_config" \
+  --delete \
+  --group "$group_id" >/dev/null || true
+
+info "Kafka smoke check passed for $KAFKA_SASL_MECHANISM"
