@@ -12,6 +12,7 @@ TOPICS=(
   milena.issue14.keyed
   milena.issue14.errors
   milena.issue14.cleanup
+  milena.issue14.interop
 )
 
 for topic in "${TOPICS[@]}"; do

@@ -14,10 +14,44 @@ export MILENA_KAFKA_SASL_MECHANISM="$KAFKA_SASL_MECHANISM"
 export MILENA_KAFKA_USERNAME="$KAFKA_USERNAME"
 export MILENA_KAFKA_PASSWORD="$KAFKA_PASSWORD"
 export MILENA_KAFKA_SSL_CA_LOCATION="${MILENA_KAFKA_SSL_CA_LOCATION:-$ROOT_DIR/docker/kafka/generated/ssl/ca.crt}"
+export MILENA_KAFKA_CLI_INTEROP_TOPIC="${MILENA_KAFKA_CLI_INTEROP_TOPIC:-milena.issue14.interop}"
+export MILENA_KAFKA_CLI_INTEROP_KEY="${MILENA_KAFKA_CLI_INTEROP_KEY:-issue16-cli-seed-$KAFKA_SASL_MECHANISM}"
+export MILENA_KAFKA_CLI_INTEROP_PAYLOAD="${MILENA_KAFKA_CLI_INTEROP_PAYLOAD:-{\"fixture\":\"issue16-cli-interop\",\"source\":\"kafka-cli\",\"mechanism\":\"$KAFKA_SASL_MECHANISM\"}}"
+export MILENA_KAFKA_CLI_INTEROP_SEEDED=1
 
 if [[ ! -f "$ROOT_DIR/src-tauri/tests/kafka_integration.rs" ]]; then
   die "src-tauri/tests/kafka_integration.rs is not present yet; run npm run kafka:smoke for broker validation"
 fi
+
+case "${1:-plain}" in
+  plain | PLAIN)
+    remote_config="${MILENA_KAFKA_CLIENT_CONFIG:-/milena-kafka/config/clients/milena.plain.container.properties}"
+    ;;
+  scram | SCRAM | SCRAM-SHA-512)
+    remote_config="${MILENA_KAFKA_CLIENT_CONFIG:-/milena-kafka/config/clients/milena.scram.container.properties}"
+    ;;
+esac
+
+topics_bin="$(kafka_cli_path kafka-topics.sh)"
+producer_bin="$(kafka_cli_path kafka-console-producer.sh)"
+
+info "creating/verifying CLI interop topic $MILENA_KAFKA_CLI_INTEROP_TOPIC through $KAFKA_SASL_MECHANISM"
+compose exec -T "$KAFKA_SERVICE" "$topics_bin" \
+  --bootstrap-server "$KAFKA_SMOKE_BROKERS" \
+  --command-config "$remote_config" \
+  --create \
+  --if-not-exists \
+  --topic "$MILENA_KAFKA_CLI_INTEROP_TOPIC" \
+  --partitions 1 \
+  --replication-factor 1
+
+info "seeding CLI interop record $MILENA_KAFKA_CLI_INTEROP_KEY"
+printf '%s|%s\n' "$MILENA_KAFKA_CLI_INTEROP_KEY" "$MILENA_KAFKA_CLI_INTEROP_PAYLOAD" | compose exec -T "$KAFKA_SERVICE" "$producer_bin" \
+  --bootstrap-server "$KAFKA_SMOKE_BROKERS" \
+  --producer.config "$remote_config" \
+  --topic "$MILENA_KAFKA_CLI_INTEROP_TOPIC" \
+  --property parse.key=true \
+  --property key.separator='|'
 
 info "running Rust Kafka integration tests against $MILENA_KAFKA_BROKERS using $MILENA_KAFKA_SASL_MECHANISM"
 (cd "$ROOT_DIR/src-tauri" && cargo test --test kafka_integration -- --nocapture)

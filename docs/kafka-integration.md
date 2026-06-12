@@ -23,8 +23,8 @@ volumes. It deletes local Kafka compose volumes before starting the broker
 again.
 
 `npm run kafka:check` runs the PLAIN smoke check, the SCRAM smoke check, then
-the Rust Kafka integration test command. It is intended for local HITL
-verification, not normal CI.
+the Rust Kafka integration test command once for PLAIN and once for SCRAM. It is
+intended for local HITL verification, not normal CI.
 
 ## Script Defaults
 
@@ -38,6 +38,7 @@ verification, not normal CI.
 | `MILENA_KAFKA_TOPIC` | `milena.issue14.records` | Topic used by focused smoke and integration checks |
 | `MILENA_KAFKA_FIXTURE` | `scripts/kafka-fixtures/order-created.json` | Payload produced by the smoke test |
 | `MILENA_KAFKA_CLIENT_CONFIG` | profile-specific file under `/milena-kafka/config/clients` | Container path used by focused smoke checks |
+| `MILENA_KAFKA_CLI_INTEROP_TOPIC` | `milena.issue14.interop` | Topic seeded by Kafka CLI before Rust interop assertions |
 
 `npm run kafka:smoke` uses the compose-side `kafka-smoke` service and verifies
 both PLAIN and SCRAM. `npm run kafka:smoke -- plain` and
@@ -144,17 +145,27 @@ MILENA_KAFKA_PASSWORD=milena-scram-secret \
 npm run kafka:test -- scram
 ```
 
-Expected coverage for issue #14:
+`npm run kafka:test -- plain` and `npm run kafka:test -- scram` also seed one
+keyed record through Kafka CLI before running Rust tests. The Rust harness then
+consumes that record through `NativeKafkaAdapter` and the public command
+boundary to prove cross-client visibility.
 
-- Topic listing returns the configured `MILENA_KAFKA_TOPIC`.
+Expected coverage for issue #16:
+
+- Topic listing returns deterministic fixture topics, filters internal topics,
+  and reports usable partition metadata.
+- Publishing valid JSON without a key and with a key reports topic, partition,
+  offset, and `delivered` status, then preserves key and payload through a
+  consumed record.
 - Polling starts with `auto.offset.reset=latest`; only records produced after
-  session start are emitted.
-- Publishing valid JSON without a key succeeds and reports topic, partition,
-  offset, and `delivered` status.
-- Publishing valid JSON with a key succeeds and reports the same ack fields.
-- Stopping a poll session reports the temporary consumer group cleanup attempt.
-- Bad credentials, unavailable broker, invalid topic, and invalid payload errors
-  appear in the pane or global error surface.
+  session start are emitted from the dedicated polling topic.
+- Stopping a poll session reports the stopped lifecycle event and temporary
+  consumer group cleanup attempt, including cleanup success or broker error.
+- Bad PLAIN and SCRAM credentials, unavailable broker, TLS/CA misconfiguration,
+  blank topic, empty payload, and non-existent topic errors surface as command
+  errors without hanging.
+- CLI-produced records are visible to Milena through the native adapter and
+  command boundary when the tests are run through `npm run kafka:test`.
 
 ## Manual Milena Checks
 

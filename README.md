@@ -43,11 +43,11 @@ cd src-tauri
 cargo test
 ```
 
-Run the local Kafka integration broker and issue #14 verification checks:
+Run the local Kafka integration broker and issue #16 HITL verification checks:
 
 ```sh
 npm run kafka:up
-npm run kafka:smoke
+npm run kafka:check
 ```
 
 See [docs/kafka-integration.md](docs/kafka-integration.md) for the full local
