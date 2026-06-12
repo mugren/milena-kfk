@@ -3,10 +3,9 @@ import {
   AppState,
   MilenaBoundaryEvent,
   RuntimeAuthConfig,
-  TopicSessionPreviewRequest,
   listKafkaTopics,
   loadAppState,
-  previewTopicSession,
+  publishKafkaRecord,
   startKafkaConsumerSession,
   stopKafkaConsumerSession,
 } from "./lib/tauri";
@@ -25,6 +24,21 @@ import {
   type RenderedKafkaRecord,
 } from "./lib/messages";
 import {
+  canSendPublisherRecord,
+  createInitialPublisherState,
+  formatPublisherPayload,
+  getPublisherPaneState,
+  openCombinedPublishPollPane,
+  openPublisherPane,
+  producerAckLabel,
+  sendPublisherRecord,
+  setPublisherKey,
+  setPublisherPayload,
+  validatePublisherPayload,
+  type PublisherPaneState,
+  type PublisherState,
+} from "./lib/publisher";
+import {
   createInitialTopicRailState,
   environmentKey,
   markTopicLoadFailed,
@@ -37,15 +51,11 @@ import {
   type TopicPinStore,
 } from "./lib/topics";
 import {
-  appendPaneActivity,
   assignTopicToPane,
   canStartPaneSession,
   createInitialWorkspaceState,
   getSelectedPane,
   isPaneEmpty,
-  markPaneError,
-  markPaneLoading,
-  markPaneReady,
   selectPane as selectWorkspacePane,
   splitPane as splitWorkspacePane,
   type SplitDirection,
@@ -83,6 +93,9 @@ function App() {
   );
   const [messageRenderPreferences, setMessageRenderPreferences] = useState(() =>
     readMessageRenderPreferences(getMessageRenderPreferenceStore()),
+  );
+  const [publisherState, setPublisherState] = useState(
+    createInitialPublisherState,
   );
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [appError, setAppError] = useState<string | null>(null);
@@ -191,44 +204,40 @@ function App() {
     );
   }
 
-  async function openBoundary(paneId: number, mode: TopicSessionPreviewRequest["mode"]) {
-    const pane = workspace.panes.find((candidate) => candidate.id === paneId);
-    if (!canStartPaneSession(pane)) {
-      return;
-    }
-
-    updateWorkspace((current) => markPaneLoading(current, paneId, mode));
-
-    try {
-      const nextSession = await previewTopicSession(
-        { topic: pane.topic, mode },
-        (event) => {
-          updateWorkspace((current) => appendPaneActivity(current, paneId, event));
-          setActivity((current) =>
-            [
-              { ...event, paneId, time: new Date().toLocaleTimeString() },
-              ...current,
-            ].slice(0, 10),
-          );
-        },
-      );
-      updateWorkspace((current) => markPaneReady(current, paneId, nextSession));
-    } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Command boundary failed";
-      updateWorkspace((current) => markPaneError(current, paneId, message));
-    }
-  }
-
   function startPolling(paneId: number, topic: string) {
     const run = nextPollingRun(paneId);
     setTopicMenu(null);
-    void startPanePollingSession({
+    return startPanePollingSession({
       paneId,
       topic,
       auth: activeRuntimeAuth,
       getWorkspace: () => workspaceRef.current,
       updateWorkspace,
+      startConsumerSession: startKafkaConsumerSession,
+      stopConsumerSession: stopKafkaConsumerSession,
+      isCurrent: () => pollingRuns.current.get(paneId) === run,
+      onEvent: (event) => {
+        setActivity((current) =>
+          [
+            { ...event, paneId, time: new Date().toLocaleTimeString() },
+            ...current,
+          ].slice(0, 10),
+        );
+      },
+      onStopError: setAppError,
+    });
+  }
+
+  function openPublishPoll(paneId: number, topic: string) {
+    const run = nextPollingRun(paneId);
+    setTopicMenu(null);
+    void openCombinedPublishPollPane({
+      paneId,
+      topic,
+      auth: activeRuntimeAuth,
+      getWorkspace: () => workspaceRef.current,
+      updateWorkspace,
+      updatePublisherState,
       startConsumerSession: startKafkaConsumerSession,
       stopConsumerSession: stopKafkaConsumerSession,
       isCurrent: () => pollingRuns.current.get(paneId) === run,
@@ -264,6 +273,47 @@ function App() {
       const next = update(current);
       workspaceRef.current = next;
       return next;
+    });
+  }
+
+  function updatePublisherState(
+    update: (current: PublisherState) => PublisherState,
+  ) {
+    setPublisherState(update);
+  }
+
+  function changePublisherPayload(
+    paneId: number,
+    topic: string | null,
+    payload: string,
+  ) {
+    setPublisherState((current) =>
+      setPublisherPayload(current, paneId, payload, topic),
+    );
+  }
+
+  function changePublisherKey(
+    paneId: number,
+    topic: string | null,
+    key: string,
+  ) {
+    setPublisherState((current) => setPublisherKey(current, paneId, key, topic));
+  }
+
+  function formatPanePublisherPayload(paneId: number, topic: string | null) {
+    setPublisherState((current) =>
+      formatPublisherPayload(current, paneId, topic),
+    );
+  }
+
+  function sendPanePublisherRecord(paneId: number) {
+    void sendPublisherRecord({
+      paneId,
+      auth: activeRuntimeAuth,
+      getWorkspace: () => workspaceRef.current,
+      getPublisherState: () => publisherState,
+      updatePublisherState,
+      publishRecord: publishKafkaRecord,
     });
   }
 
@@ -391,9 +441,11 @@ function App() {
               className="primary"
               type="button"
               disabled={!canStartPaneSession(activePane)}
-              onClick={() => activePane && openBoundary(activePane.id, "publish")}
+              onClick={() =>
+                activePane?.topic && openPublishPoll(activePane.id, activePane.topic)
+              }
             >
-              Send
+              Publish
             </button>
           </div>
         </header>
@@ -411,7 +463,22 @@ function App() {
                 );
               }}
               onPoll={() => pane.topic && startPolling(pane.id, pane.topic)}
-              onPublish={() => openBoundary(pane.id, "publish")}
+              publisher={getPublisherPaneState(
+                publisherState,
+                pane.id,
+                pane.topic,
+              )}
+              onOpenPublisher={() =>
+                pane.topic && openPublishPoll(pane.id, pane.topic)
+              }
+              onPayloadChange={(payload) =>
+                changePublisherPayload(pane.id, pane.topic, payload)
+              }
+              onKeyChange={(key) => changePublisherKey(pane.id, pane.topic, key)}
+              onFormatPayload={() =>
+                formatPanePublisherPayload(pane.id, pane.topic)
+              }
+              onSend={() => sendPanePublisherRecord(pane.id)}
               environmentKey={activeEnvironmentKey}
               renderPreferences={messageRenderPreferences}
               onRenderModeChange={setMessageRenderMode}
@@ -483,6 +550,7 @@ function App() {
           panes={workspace.panes}
           selectedPaneId={workspace.selectedPaneId}
           onPoll={(paneId) => startPolling(paneId, topicMenu.topic)}
+          onPublishPoll={(paneId) => openPublishPoll(paneId, topicMenu.topic)}
         />
       ) : null}
     </main>
@@ -495,7 +563,12 @@ type PaneProps = {
   canSplit: boolean;
   onActivate: () => void;
   onPoll: () => void;
-  onPublish: () => void;
+  publisher: PublisherPaneState;
+  onOpenPublisher: () => void;
+  onPayloadChange: (payload: string) => void;
+  onKeyChange: (key: string) => void;
+  onFormatPayload: () => void;
+  onSend: () => void;
   environmentKey: string;
   renderPreferences: MessageRenderPreferences;
   onRenderModeChange: (topic: string, mode: MessageRenderMode) => void;
@@ -509,7 +582,12 @@ function Pane({
   canSplit,
   onActivate,
   onPoll,
-  onPublish,
+  publisher,
+  onOpenPublisher,
+  onPayloadChange,
+  onKeyChange,
+  onFormatPayload,
+  onSend,
   environmentKey,
   renderPreferences,
   onRenderModeChange,
@@ -527,6 +605,13 @@ function Pane({
     () => new Set(),
   );
   const recordEvents = pane.activity.filter(isKafkaRecordEvent);
+  const payloadValidation = validatePublisherPayload(publisher.payload);
+  const canSend = canSendPublisherRecord(pane, publisher);
+  const publisherReadiness = publisherReadinessLabel(
+    pane,
+    publisher,
+    payloadValidation.ok ? null : payloadValidation.error,
+  );
 
   function toggleRow(identity: string) {
     setExpandedRows((current) => {
@@ -604,24 +689,61 @@ function Pane({
       </div>
 
       <div className="pane-workbench">
-        <section className="publisher">
+        <section className="publisher" onClick={(event) => event.stopPropagation()}>
           <header>
             <span className="eyebrow">Publisher</span>
-            <button type="button" onClick={stopEvent(() => undefined)}>
-              Format
+            <button
+              className="secondary compact"
+              type="button"
+              onClick={stopEvent(onFormatPayload)}
+            >
+              Format JSON
             </button>
           </header>
-          <pre>{`{
-  "topic": ${pane.topic ? `"${pane.topic}"` : "null"},
-  "key": "preview"
-}`}</pre>
+          <div className="publisher-fields">
+            <label>
+              <span>Key</span>
+              <input
+                aria-label={`Kafka key for pane ${pane.id}`}
+                placeholder="Optional key"
+                type="text"
+                value={publisher.key}
+                onChange={(event) => onKeyChange(event.currentTarget.value)}
+              />
+            </label>
+            <label>
+              <span>Payload</span>
+              <textarea
+                aria-label={`JSON payload for pane ${pane.id}`}
+                spellCheck={false}
+                value={publisher.payload}
+                onChange={(event) => onPayloadChange(event.currentTarget.value)}
+              />
+            </label>
+          </div>
+          <section className={`producer-status ${publisher.status}`}>
+            <div>
+              <span className="eyebrow">Producer</span>
+              <strong>{producerAckLabel(publisher.ack)}</strong>
+            </div>
+            <small>{publisher.error ?? publisherReadiness}</small>
+          </section>
           <div className="publisher-footer">
-            <span>acks=all</span>
+            <span>{publisher.status === "sending" ? "sending" : "acks=all"}</span>
+            {pane.mode === "poll" ? null : (
+              <button
+                type="button"
+                onClick={stopEvent(onOpenPublisher)}
+                disabled={!pane.topic}
+              >
+                Start poll
+              </button>
+            )}
             <button
               className="primary"
               type="button"
-              onClick={stopEvent(onPublish)}
-              disabled={!canStart}
+              onClick={stopEvent(onSend)}
+              disabled={!canSend}
             >
               Send
             </button>
@@ -762,11 +884,13 @@ function TopicContextMenu({
   panes,
   selectedPaneId,
   onPoll,
+  onPublishPoll,
 }: {
   menu: NonNullable<TopicMenuState>;
   panes: WorkspacePane[];
   selectedPaneId: number;
   onPoll: (paneId: number) => void;
+  onPublishPoll: (paneId: number) => void;
 }) {
   return (
     <div
@@ -776,18 +900,24 @@ function TopicContextMenu({
       onClick={(event) => event.stopPropagation()}
     >
       <header>
-        <span className="eyebrow">Poll topic</span>
+        <span className="eyebrow">Topic actions</span>
         <strong>{menu.topic}</strong>
       </header>
       {panes.map((pane) => (
-        <button
-          key={pane.id}
-          type="button"
-          role="menuitem"
-          onClick={() => onPoll(pane.id)}
-        >
-          {pane.id === selectedPaneId ? "Selected pane" : `Pane ${pane.id}`}
-        </button>
+        <div className="topic-menu-row" key={pane.id} role="none">
+          <span>{pane.id === selectedPaneId ? "Selected" : `Pane ${pane.id}`}</span>
+          <button type="button" role="menuitem" onClick={() => onPoll(pane.id)}>
+            Poll
+          </button>
+          <button
+            className="primary"
+            type="button"
+            role="menuitem"
+            onClick={() => onPublishPoll(pane.id)}
+          >
+            Publish
+          </button>
+        </div>
       ))}
     </div>
   );
@@ -829,6 +959,34 @@ function isKafkaRecordEvent(
 
 function formatHeaderValue(value: string | null | undefined): string {
   return value ?? "(null)";
+}
+
+function publisherReadinessLabel(
+  pane: WorkspacePane,
+  publisher: PublisherPaneState,
+  validationError: string | null,
+) {
+  if (publisher.error) {
+    return publisher.error;
+  }
+
+  if (validationError) {
+    return validationError;
+  }
+
+  if (!pane.topic) {
+    return "Assign a topic before publishing";
+  }
+
+  if (pane.mode !== "poll" || pane.status !== "ready") {
+    return "Start polling before publishing";
+  }
+
+  if (publisher.ack) {
+    return `ack at ${new Date(publisher.ack.sentAt).toLocaleTimeString()}`;
+  }
+
+  return "Ready to publish";
 }
 
 function getTopicPinStore(): TopicPinStore | undefined {
