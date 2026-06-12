@@ -8,6 +8,7 @@ import type {
 } from "./tauri";
 import {
   appendPaneActivity,
+  closePane,
   markPaneError,
   markPanePollingStarted,
   markPanePollingStarting,
@@ -144,6 +145,23 @@ export async function stopPanePollingSession({
 }: StopPanePollingOptions): Promise<void> {
   const sessionId = getPanePollingSessionId(getWorkspace(), paneId);
   updateWorkspace((current) => stopPane(current, paneId));
+
+  if (!sessionId) {
+    return;
+  }
+
+  await stopConsumerBestEffort(stopConsumerSession, sessionId, onStopError);
+}
+
+export async function closePanePollingSession({
+  paneId,
+  getWorkspace,
+  updateWorkspace,
+  stopConsumerSession,
+  onStopError,
+}: StopPanePollingOptions): Promise<void> {
+  const sessionId = getPanePollingSessionId(getWorkspace(), paneId);
+  updateWorkspace((current) => closePane(current, paneId));
 
   if (!sessionId) {
     return;

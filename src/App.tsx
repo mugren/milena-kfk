@@ -1,5 +1,22 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
+  ChevronDown,
+  ChevronUp,
+  Maximize2,
+  Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  Pin,
+  PinOff,
+  Play,
+  SplitSquareHorizontal,
+  SplitSquareVertical,
+  Square,
+  X,
+} from "lucide-react";
+import {
   AppState,
   RuntimeAuthConfig,
   listKafkaTopics,
@@ -17,6 +34,8 @@ import {
   type GlobalActivitySource,
 } from "./lib/activity";
 import {
+  closePanePollingSession,
+  getPanePollingSessionId,
   startPanePollingSession,
   stopPanePollingSession,
 } from "./lib/polling";
@@ -35,8 +54,6 @@ import {
   createInitialPublisherState,
   formatPublisherPayload,
   getPublisherPaneState,
-  openCombinedPublishPollPane,
-  openPublisherPane,
   producerAckLabel,
   sendPublisherRecord,
   setPublisherKey,
@@ -58,14 +75,18 @@ import {
   type TopicPinStore,
 } from "./lib/topics";
 import {
-  assignTopicToPane,
   canStartPaneSession,
   createInitialWorkspaceState,
+  expandPane as expandWorkspacePaneState,
   getSelectedPane,
   isPaneEmpty,
+  openTopicInWorkspace,
+  restoreExpandedPane,
   selectPane as selectWorkspacePane,
+  selectTopicPreview,
   splitPane as splitWorkspacePane,
   type SplitDirection,
+  type TopicOpenPlacement,
   type WorkspacePane,
   type WorkspaceState,
 } from "./lib/workspace";
@@ -75,6 +96,19 @@ type TopicMenuState = {
   x: number;
   y: number;
 } | null;
+
+type TopicPreviewModel = {
+  name: string;
+  partitionCount: number | null;
+  renderMode: MessageRenderMode;
+};
+
+type VisibleColumns = {
+  topics: boolean;
+  inspector: boolean;
+};
+
+const APP_SHELL_NAME = "Milena - Kafka Reader";
 
 const activeRuntimeAuth: RuntimeAuthConfig = {
   environment: "local-dev",
@@ -103,9 +137,17 @@ function App() {
   );
   const [activity, setActivity] = useState<GlobalActivityEntry[]>([]);
   const [topicMenu, setTopicMenu] = useState<TopicMenuState>(null);
+  const [visibleColumns, setVisibleColumns] = useState<VisibleColumns>({
+    topics: true,
+    inspector: true,
+  });
   const requestedTopicLoads = useRef(new Set<string>());
   const workspaceRef = useRef(workspace);
   const pollingRuns = useRef(new Map<number, number>());
+
+  useEffect(() => {
+    document.title = APP_SHELL_NAME;
+  }, []);
 
   useEffect(() => {
     loadAppState()
@@ -142,24 +184,49 @@ function App() {
     () => getSelectedPane(workspace),
     [workspace],
   );
+  const expandedPane = useMemo(
+    () =>
+      workspace.expandedPaneId === null
+        ? null
+        : workspace.panes.find((pane) => pane.id === workspace.expandedPaneId) ??
+          null,
+    [workspace.expandedPaneId, workspace.panes],
+  );
+  const visiblePanes = expandedPane ? [expandedPane] : workspace.panes;
+  const visibleLayout = expandedPane ? "single" : workspace.layout;
 
   const activeTopic = activePane?.topic ?? null;
+  const previewTopic = workspace.selectedTopic ?? activeTopic;
   const activeEnvironmentKey = environmentKey(activeRuntimeAuth);
   const topicRows = useMemo(() => visibleTopicRows(topicRail), [topicRail]);
+  const topicPreview = useMemo<TopicPreviewModel | null>(() => {
+    if (!workspace.selectedTopic || workspace.selectedTopic === activePane?.topic) {
+      return null;
+    }
 
-  const selectedTopicMeta = useMemo(() => {
-    const selected = topicRail.topics.find(
-      (topic) => topic.name === activeTopic,
+    const metadata = topicRail.topics.find(
+      (topic) => topic.name === workspace.selectedTopic,
     );
-    return selected
-      ? `${selected.partitionCount} partitions / JSON`
-      : "No topic assigned / no active Kafka session";
-  }, [activeTopic, topicRail.topics]);
+
+    return {
+      name: workspace.selectedTopic,
+      partitionCount: metadata?.partitionCount ?? null,
+      renderMode: topicMessageRenderMode(
+        messageRenderPreferences,
+        activeEnvironmentKey,
+        workspace.selectedTopic,
+      ),
+    };
+  }, [
+    activeEnvironmentKey,
+    activePane?.topic,
+    messageRenderPreferences,
+    topicRail.topics,
+    workspace.selectedTopic,
+  ]);
 
   function selectTopic(topic: string) {
-    updateWorkspace((current) =>
-      assignTopicToPane(current, current.selectedPaneId, topic),
-    );
+    updateWorkspace((current) => selectTopicPreview(current, topic));
   }
 
   async function loadTopicList(force: boolean) {
@@ -231,38 +298,73 @@ function App() {
     });
   }
 
-  function openPublishPoll(paneId: number, topic: string) {
-    const run = nextPollingRun(paneId);
-    setTopicMenu(null);
-    void openCombinedPublishPollPane({
-      paneId,
-      topic,
-      auth: activeRuntimeAuth,
-      getWorkspace: () => workspaceRef.current,
-      updateWorkspace,
-      updatePublisherState,
-      startConsumerSession: startKafkaConsumerSession,
-      stopConsumerSession: stopKafkaConsumerSession,
-      isCurrent: () => pollingRuns.current.get(paneId) === run,
-      onEvent: (event) => {
-        setActivity((current) =>
-          appendBoundaryEventActivity(current, event, paneId),
-        );
-      },
-      onError: (message) =>
-        recordGlobalError("consumer", "Consumer session failed", message, paneId),
-      onStopError: (message) =>
-        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
-    });
-  }
-
   function splitPane(paneId: number, direction: SplitDirection) {
     updateWorkspace((current) => splitWorkspacePane(current, paneId, direction));
+  }
+
+  function expandPane(paneId: number) {
+    updateWorkspace((current) => expandWorkspacePaneState(current, paneId));
+  }
+
+  function restorePane() {
+    updateWorkspace(restoreExpandedPane);
+  }
+
+  function openTopic(topic: string, placement: TopicOpenPlacement) {
+    setTopicMenu(null);
+    const current = workspaceRef.current;
+    const replacedPane = placement === "selected" ? getSelectedPane(current) : null;
+    const replacedSessionId = replacedPane
+      ? getPanePollingSessionId(current, replacedPane.id)
+      : null;
+
+    if (replacedPane) {
+      nextPollingRun(replacedPane.id);
+    }
+
+    const result = openTopicInWorkspace(current, topic, placement);
+    workspaceRef.current = result.workspace;
+    setWorkspace(result.workspace);
+
+    if (result.status === "pane-limit") {
+      recordGlobalError(
+        "topics",
+        "Pane limit reached",
+        "Milena supports up to four open panes.",
+      );
+    }
+
+    if (replacedSessionId && replacedPane) {
+      void stopKafkaConsumerSession({ sessionId: replacedSessionId }).catch(
+        (cause: unknown) => {
+          const message =
+            cause instanceof Error ? cause.message : "Kafka consumer cleanup failed";
+          recordGlobalError(
+            "consumer",
+            "Consumer cleanup failed",
+            message,
+            replacedPane.id,
+          );
+        },
+      );
+    }
   }
 
   function stopPane(paneId: number) {
     nextPollingRun(paneId);
     void stopPanePollingSession({
+      paneId,
+      getWorkspace: () => workspaceRef.current,
+      updateWorkspace,
+      stopConsumerSession: stopKafkaConsumerSession,
+      onStopError: (message) =>
+        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
+    });
+  }
+
+  function closeWorkspacePane(paneId: number) {
+    nextPollingRun(paneId);
+    void closePanePollingSession({
       paneId,
       getWorkspace: () => workspaceRef.current,
       updateWorkspace,
@@ -329,8 +431,9 @@ function App() {
     return next;
   }
 
-  function openTopicMenu(event: MouseEvent<HTMLDivElement>, topic: string) {
+  function openTopicMenu(event: MouseEvent<HTMLElement>, topic: string) {
     event.preventDefault();
+    event.stopPropagation();
     setTopicMenu({ topic, x: event.clientX, y: event.clientY });
   }
 
@@ -349,140 +452,205 @@ function App() {
     setActivity(clearGlobalActivity());
   }
 
+  function setColumnVisibility(column: keyof VisibleColumns, visible: boolean) {
+    setVisibleColumns((current) => ({
+      ...current,
+      [column]: visible,
+    }));
+  }
+
   return (
-    <main className="app-shell">
-      <aside className="rail rail-left" aria-label="Kafka topics">
-        <header className="rail-header">
-          <div>
-            <span className="eyebrow">Milena</span>
-            <strong>{appState?.platform ?? "macOS dev"}</strong>
-          </div>
-          <span className="status-pill">Local</span>
-        </header>
-        <section className="environment-summary">
-          <span>Cluster</span>
-          <button
-            className="refresh-button"
-            type="button"
-            disabled={topicRail.status === "loading"}
-            onClick={refreshTopicList}
-          >
-            Refresh
-          </button>
-          <strong>{activeRuntimeAuth.brokers.join(", ")}</strong>
-          <small>
-            {topicRailStatus(topicRail.status, topicRail.topics.length)}
-          </small>
-        </section>
-        <div className="topic-search">
-          <input
-            aria-label="Search topics"
-            placeholder="Search topics"
-            type="search"
-            value={topicRail.searchQuery}
-            onChange={(event) => {
-              const value = event.currentTarget.value;
-              setTopicRail((current) =>
-                setTopicSearch(current, value),
-              );
-            }}
-          />
-        </div>
-        {topicRail.error ? (
-          <div className="error-strip compact">{topicRail.error}</div>
-        ) : null}
-        <nav className="topic-list">
-          {topicRows.length === 0 ? (
-            <p className="topic-empty">
-              {topicRail.status === "loading" ? "Loading topics" : "No topics"}
-            </p>
-          ) : (
-            topicRows.map((topic) => (
-              <div
-                className={[
-                  "topic",
-                  topic.name === activeTopic ? "active" : "",
-                  topic.pinned ? "pinned" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                key={topic.name}
-                onContextMenu={(event) => openTopicMenu(event, topic.name)}
+    <main
+      className={[
+        "app-shell",
+        visibleColumns.topics ? "" : "topics-hidden",
+        visibleColumns.inspector ? "" : "inspector-hidden",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      {visibleColumns.topics ? (
+        <aside className="rail rail-left" aria-label="Kafka topics">
+          <header className="rail-header">
+            <div className="rail-title">
+              <strong>{APP_SHELL_NAME}</strong>
+              <small>{activeRuntimeAuth.environment}</small>
+            </div>
+            <div className="rail-header-actions">
+              <span className="status-pill">local</span>
+              <button
+                className="rail-toggle-button"
+                type="button"
+                aria-label="Hide topic sidebar"
+                title="Hide topic sidebar"
+                onClick={() => setColumnVisibility("topics", false)}
               >
-                <button
-                  className="topic-select"
-                  type="button"
-                  onClick={() => selectTopic(topic.name)}
-                >
-                  <span className="topic-marker" />
-                  <span>
-                    <strong>{topic.name}</strong>
-                    <small>{topic.partitionCount} partitions</small>
-                  </span>
-                  <span className="topic-mode">
-                    {topicMessageRenderMode(
-                      messageRenderPreferences,
-                      activeEnvironmentKey,
-                      topic.name,
-                    ).toUpperCase()}
-                  </span>
-                </button>
-                <button
-                  className="topic-pin"
-                  type="button"
-                  aria-label={`${topic.pinned ? "Unpin" : "Pin"} ${topic.name}`}
-                  aria-pressed={topic.pinned}
-                  onClick={() => pinTopic(topic.name)}
-                >
-                  <span />
-                </button>
-              </div>
-            ))
-          )}
-        </nav>
-      </aside>
+                <PanelLeftClose aria-hidden="true" size={15} strokeWidth={1.9} />
+              </button>
+            </div>
+          </header>
+          <section className="environment-summary">
+            <span>Cluster</span>
+            <button
+              className="refresh-button"
+              type="button"
+              disabled={topicRail.status === "loading"}
+              onClick={refreshTopicList}
+            >
+              Refresh
+            </button>
+            <strong>{activeRuntimeAuth.brokers.join(", ")}</strong>
+            <small>
+              {topicRailStatus(topicRail.status, topicRail.topics.length)}
+            </small>
+          </section>
+          <div className="topic-search">
+            <input
+              aria-label="Search topics"
+              placeholder="Search topics"
+              type="search"
+              value={topicRail.searchQuery}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setTopicRail((current) =>
+                  setTopicSearch(current, value),
+                );
+              }}
+            />
+          </div>
+          {topicRail.error ? (
+            <div className="error-strip compact">{topicRail.error}</div>
+          ) : null}
+          <nav className="topic-list">
+            {topicRows.length === 0 ? (
+              <p className="topic-empty">
+                {topicRail.status === "loading" ? "Loading topics" : "No topics"}
+              </p>
+            ) : (
+              topicRows.map((topic) => {
+                const selected = topic.name === previewTopic;
+                const pinAction = topic.pinned ? "Unpin" : "Pin";
+                const renderMode = topicMessageRenderMode(
+                  messageRenderPreferences,
+                  activeEnvironmentKey,
+                  topic.name,
+                );
+
+                return (
+                  <div
+                    className={[
+                      "topic",
+                      selected ? "active" : "",
+                      topic.pinned ? "pinned" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    data-pinned={topic.pinned}
+                    data-selected={selected}
+                    key={topic.name}
+                    onContextMenu={(event) => openTopicMenu(event, topic.name)}
+                  >
+                    <button
+                      className="topic-select"
+                      type="button"
+                      aria-current={selected ? "true" : undefined}
+                      onClick={() => selectTopic(topic.name)}
+                      title={topic.name}
+                    >
+                      <span className="topic-marker" />
+                      <span className="topic-copy">
+                        <strong>{topic.name}</strong>
+                        <small>
+                          {topic.partitionCount} partitions / {renderMode}
+                        </small>
+                      </span>
+                    </button>
+                    <button
+                      className="topic-open"
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-label={`Open actions for ${topic.name}`}
+                      onClick={(event) => openTopicMenu(event, topic.name)}
+                    >
+                      Open
+                    </button>
+                    <button
+                      className="topic-pin"
+                      type="button"
+                      aria-label={`${pinAction} ${topic.name}`}
+                      aria-pressed={topic.pinned}
+                      onClick={() => pinTopic(topic.name)}
+                      title={`${pinAction} ${topic.name}`}
+                    >
+                      {topic.pinned ? (
+                        <PinOff aria-hidden="true" size={14} strokeWidth={1.9} />
+                      ) : (
+                        <Pin aria-hidden="true" size={14} strokeWidth={1.9} />
+                      )}
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </nav>
+        </aside>
+      ) : null}
 
       <section className="workspace" aria-label="Milena workspace">
-        <header className="workspace-header">
-          <div>
-            <span className="eyebrow">Workspace</span>
-            <h1>{activeTopic ?? "Empty pane"}</h1>
-            <p>{selectedTopicMeta}</p>
+        {!visibleColumns.topics || !visibleColumns.inspector ? (
+          <div className="workspace-rail-controls" aria-label="Hidden sidebars">
+            {!visibleColumns.topics ? (
+              <button
+                className="rail-toggle-button workspace-rail-toggle is-left"
+                type="button"
+                aria-label="Show topic sidebar"
+                title="Show topic sidebar"
+                onClick={() => setColumnVisibility("topics", true)}
+              >
+                <PanelLeftOpen aria-hidden="true" size={15} strokeWidth={1.9} />
+              </button>
+            ) : null}
+            {!visibleColumns.inspector ? (
+              <button
+                className="rail-toggle-button workspace-rail-toggle is-right"
+                type="button"
+                aria-label="Show inspector column"
+                title="Show inspector column"
+                onClick={() => setColumnVisibility("inspector", true)}
+              >
+                <PanelRightOpen aria-hidden="true" size={15} strokeWidth={1.9} />
+              </button>
+            ) : null}
           </div>
-          <div className="toolbar">
-            <button
-              type="button"
-              disabled={!canStartPaneSession(activePane)}
-              onClick={() =>
-                activePane?.topic && startPolling(activePane.id, activePane.topic)
-              }
-            >
-              Poll
-            </button>
-            <button
-              className="primary"
-              type="button"
-              disabled={!canStartPaneSession(activePane)}
-              onClick={() =>
-                activePane?.topic && openPublishPoll(activePane.id, activePane.topic)
-              }
-            >
-              Publish
-            </button>
-          </div>
-        </header>
-
-        <section className="pane-grid" data-layout={workspace.layout}>
-          {workspace.panes.map((pane) => (
+        ) : null}
+        <section
+          className={[
+            "pane-grid",
+            visiblePanes.length === 0 ? "is-empty" : "",
+            expandedPane ? "is-expanded" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          data-layout={visibleLayout}
+        >
+          {visiblePanes.length === 0 ? (
+            <p className="workspace-empty">
+              {previewTopic
+                ? "Topic selected for preview."
+                : "Select a topic to preview it."}
+            </p>
+          ) : visiblePanes.map((pane) => (
             <Pane
               key={pane.id}
               pane={pane}
               active={pane.id === workspace.selectedPaneId}
-              canSplit={workspace.panes.length < 4}
+              canSplit={!expandedPane && workspace.panes.length < 4}
+              isExpanded={pane.id === workspace.expandedPaneId}
               onActivate={() => {
-                updateWorkspace((current) =>
-                  selectWorkspacePane(current, pane.id),
-                );
+                updateWorkspace((current) => ({
+                  ...selectWorkspacePane(current, pane.id),
+                  selectedTopic: pane.topic,
+                }));
               }}
               onPoll={() => pane.topic && startPolling(pane.id, pane.topic)}
               publisher={getPublisherPaneState(
@@ -490,9 +658,6 @@ function App() {
                 pane.id,
                 pane.topic,
               )}
-              onOpenPublisher={() =>
-                pane.topic && openPublishPoll(pane.id, pane.topic)
-              }
               onPayloadChange={(payload) =>
                 changePublisherPayload(pane.id, pane.topic, payload)
               }
@@ -505,23 +670,129 @@ function App() {
               renderPreferences={messageRenderPreferences}
               onRenderModeChange={setMessageRenderMode}
               onSplit={(direction) => splitPane(pane.id, direction)}
+              onExpand={() => expandPane(pane.id)}
+              onRestore={restorePane}
               onStop={() => stopPane(pane.id)}
+              onClose={() => closeWorkspacePane(pane.id)}
             />
           ))}
         </section>
       </section>
 
-      <aside className="rail rail-right" aria-label="Activity log">
-        <header className="rail-header">
+      {visibleColumns.inspector ? (
+        <RightRail
+          activePane={activePane}
+          activity={activity}
+          layout={workspace.layout}
+          paneCount={workspace.panes.length}
+          topicPreview={topicPreview}
+          onClearActivity={clearActivityLog}
+          onHideInspector={() => setColumnVisibility("inspector", false)}
+        />
+      ) : null}
+      {topicMenu ? (
+        <TopicContextMenu
+          menu={topicMenu}
+          panes={workspace.panes}
+          selectedPaneId={workspace.selectedPaneId}
+          onOpen={(placement) => openTopic(topicMenu.topic, placement)}
+        />
+      ) : null}
+    </main>
+  );
+}
+
+export function RightRail({
+  activePane,
+  activity,
+  layout,
+  paneCount,
+  topicPreview,
+  onClearActivity,
+  onHideInspector = () => undefined,
+}: {
+  activePane: WorkspacePane | undefined;
+  activity: GlobalActivityEntry[];
+  layout: WorkspaceState["layout"];
+  paneCount: number;
+  topicPreview: TopicPreviewModel | null;
+  onClearActivity: () => void;
+  onHideInspector?: () => void;
+}) {
+  const statusClass = topicPreview ? "preview" : activePane?.status ?? "idle";
+  const contextPill = topicPreview ? "preview" : activePane ? "selected" : "idle";
+  const inspectorTitle = topicPreview
+    ? "Topic preview"
+    : activePane
+      ? "Selected pane"
+      : "No selection";
+  const inspectorContext = topicPreview
+    ? topicPreview.name
+    : activePane
+      ? `Pane ${activePane.id}`
+      : formatLayout(layout, paneCount);
+
+  return (
+    <aside className="rail rail-right" aria-label="Activity log">
+      <header className="rail-header">
+        <div className="rail-title">
+          <span className="eyebrow">Inspector</span>
+          <strong>{inspectorTitle}</strong>
+          <small>{inspectorContext}</small>
+        </div>
+        <div className="rail-header-actions">
+          <span className={`status-pill ${statusClass}`}>{contextPill}</span>
+          <button
+            className="rail-toggle-button"
+            type="button"
+            aria-label="Hide inspector column"
+            title="Hide inspector column"
+            onClick={onHideInspector}
+          >
+            <PanelRightClose aria-hidden="true" size={15} strokeWidth={1.9} />
+          </button>
+        </div>
+      </header>
+      {topicPreview ? (
+        <section className="topic-preview">
           <div>
-            <span className="eyebrow">Pane state</span>
-            <strong>{activePane ? `Pane ${activePane.id}` : "No pane"}</strong>
+            <span>Topic</span>
+            <strong>{topicPreview.name}</strong>
           </div>
-          <span className={`status-pill ${activePane?.status ?? "idle"}`}>
-            {activePane?.status ?? "idle"}
-          </span>
-        </header>
+          <div>
+            <span>Partitions</span>
+            <strong>
+              {topicPreview.partitionCount === null
+                ? "unknown"
+                : `${topicPreview.partitionCount} partitions`}
+            </strong>
+          </div>
+          <div>
+            <span>Render</span>
+            <strong>{topicPreview.renderMode}</strong>
+          </div>
+          <div className="topic-actions">
+            <span>Open actions</span>
+            <strong>
+              <span>Poll</span>
+              <span>Publish</span>
+            </strong>
+          </div>
+        </section>
+      ) : (
         <section className="pane-state">
+          {activePane ? (
+            <>
+              <div>
+                <span>Pane</span>
+                <strong>Pane {activePane.id}</strong>
+              </div>
+              <div>
+                <span>Status</span>
+                <strong>{activePane.status}</strong>
+              </div>
+            </>
+          ) : null}
           <div>
             <span>Topic</span>
             <strong>{activePane?.topic ?? "none"}</strong>
@@ -531,56 +802,37 @@ function App() {
             <strong>{activePane?.consumerGroup ?? "none"}</strong>
           </div>
           <div>
-            <span>Split</span>
-            <strong>{formatLayout(workspace.layout)}</strong>
+            <span>Layout</span>
+            <strong>{formatLayout(layout, paneCount)}</strong>
           </div>
         </section>
-        <section className="split-rules">
-          <header>
-            <span className="eyebrow">Capabilities</span>
-          </header>
-          <ul>
-            {(appState?.capabilities ?? ["command-boundary"]).map((capability) => (
-              <li key={capability}>{capability}</li>
-            ))}
-          </ul>
-        </section>
-        <section className="activity-log">
-          <header>
-            <span className="eyebrow">Activity & errors</span>
-            <button type="button" onClick={clearActivityLog}>
-              Clear
-            </button>
-          </header>
-          {activity.length === 0 ? (
-            <p>Inactive</p>
-          ) : (
-            activity.map((event) => (
-              <p
-                className={event.severity === "error" ? "activity-error" : ""}
-                key={event.id}
-              >
-                <span>{event.time}</span>
-                <strong>{event.paneId ? `P${event.paneId}` : event.source}</strong>
-                <span>
-                  {event.message}
-                  {event.detail ? <small>{event.detail}</small> : null}
-                </span>
-              </p>
-            ))
-          )}
-        </section>
-      </aside>
-      {topicMenu ? (
-        <TopicContextMenu
-          menu={topicMenu}
-          panes={workspace.panes}
-          selectedPaneId={workspace.selectedPaneId}
-          onPoll={(paneId) => startPolling(paneId, topicMenu.topic)}
-          onPublishPoll={(paneId) => openPublishPoll(paneId, topicMenu.topic)}
-        />
-      ) : null}
-    </main>
+      )}
+      <section className="activity-log">
+        <header>
+          <span className="eyebrow">Activity & errors</span>
+          <button type="button" onClick={onClearActivity}>
+            Clear
+          </button>
+        </header>
+        {activity.length === 0 ? (
+          <p>Inactive</p>
+        ) : (
+          activity.map((event) => (
+            <p
+              className={event.severity === "error" ? "activity-error" : ""}
+              key={event.id}
+            >
+              <span>{event.time}</span>
+              <strong>{event.paneId ? `P${event.paneId}` : event.source}</strong>
+              <span>
+                {event.message}
+                {event.detail ? <small>{event.detail}</small> : null}
+              </span>
+            </p>
+          ))
+        )}
+      </section>
+    </aside>
   );
 }
 
@@ -588,10 +840,10 @@ type PaneProps = {
   pane: WorkspacePane;
   active: boolean;
   canSplit: boolean;
+  isExpanded: boolean;
   onActivate: () => void;
   onPoll: () => void;
   publisher: PublisherPaneState;
-  onOpenPublisher: () => void;
   onPayloadChange: (payload: string) => void;
   onKeyChange: (key: string) => void;
   onFormatPayload: () => void;
@@ -600,17 +852,20 @@ type PaneProps = {
   renderPreferences: MessageRenderPreferences;
   onRenderModeChange: (topic: string, mode: MessageRenderMode) => void;
   onSplit: (direction: SplitDirection) => void;
+  onExpand: () => void;
+  onRestore: () => void;
   onStop: () => void;
+  onClose: () => void;
 };
 
-function Pane({
+export function Pane({
   pane,
   active,
   canSplit,
+  isExpanded,
   onActivate,
   onPoll,
   publisher,
-  onOpenPublisher,
   onPayloadChange,
   onKeyChange,
   onFormatPayload,
@@ -619,7 +874,10 @@ function Pane({
   renderPreferences,
   onRenderModeChange,
   onSplit,
+  onExpand,
+  onRestore,
   onStop,
+  onClose,
 }: PaneProps) {
   const empty = isPaneEmpty(pane);
   const canStart = canStartPaneSession(pane);
@@ -631,6 +889,10 @@ function Pane({
   const [expandedRows, setExpandedRows] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [publisherExpanded, setPublisherExpanded] = useState(false);
+  useEffect(() => {
+    setPublisherExpanded(false);
+  }, [pane.id, pane.topic]);
   const recordEvents = pane.activity.filter(isKafkaRecordEvent);
   const payloadValidation = validatePublisherPayload(publisher.payload);
   const canSend = canSendPublisherRecord(pane, publisher);
@@ -639,6 +901,8 @@ function Pane({
     publisher,
     payloadValidation.ok ? null : payloadValidation.error,
   );
+  const sessionButton = paneSessionButtonState(pane);
+  const compactStatus = compactPaneStatusLabel(pane);
 
   function toggleRow(identity: string) {
     setExpandedRows((current) => {
@@ -667,33 +931,77 @@ function Pane({
       onClick={onActivate}
     >
       <header className="pane-header">
-        <div>
+        <div className="pane-identity">
           <span className="eyebrow">Pane {pane.id} / {pane.mode}</span>
-          <h2>{pane.topic ?? "Empty pane"}</h2>
+          <div className="pane-topic-row">
+            <h2>{pane.topic ?? "Empty pane"}</h2>
+            <div className="pane-session-actions">
+              <button
+                className="pane-session-button"
+                type="button"
+                aria-label={sessionButton.label}
+                onClick={stopEvent(
+                  sessionButton.action === "stop" ? onStop : onPoll,
+                )}
+                disabled={!canStart}
+              >
+                {sessionButton.action === "stop" ? (
+                  <Square aria-hidden="true" size={11} fill="currentColor" />
+                ) : (
+                  <Play aria-hidden="true" size={12} fill="currentColor" />
+                )}
+                <span>{sessionButton.label}</span>
+              </button>
+            </div>
+          </div>
           <small>{pane.consumerGroup ?? "No consumer group"}</small>
         </div>
         <div className="pane-actions">
-          <button type="button" onClick={stopEvent(onPoll)} disabled={!canStart}>
-            Poll
+          <button
+            className="pane-icon-button pane-expand-button"
+            type="button"
+            title={
+              isExpanded ? `Restore pane ${pane.id}` : `Maximize pane ${pane.id}`
+            }
+            aria-label={
+              isExpanded ? `Restore pane ${pane.id}` : `Maximize pane ${pane.id}`
+            }
+            onClick={stopEvent(isExpanded ? onRestore : onExpand)}
+          >
+            {isExpanded ? (
+              <Minimize2 aria-hidden="true" size={15} strokeWidth={1.9} />
+            ) : (
+              <Maximize2 aria-hidden="true" size={15} strokeWidth={1.9} />
+            )}
           </button>
           <button
+            className="pane-icon-button pane-close-button"
+            type="button"
+            title={`Close pane ${pane.id}`}
+            aria-label={`Close pane ${pane.id}`}
+            onClick={stopEvent(onClose)}
+          >
+            <X aria-hidden="true" size={15} strokeWidth={2.1} />
+          </button>
+          <button
+            className="pane-icon-button pane-split-button"
             type="button"
             aria-label={`Split pane ${pane.id} right`}
+            title={`Split pane ${pane.id} right`}
             onClick={stopEvent(() => onSplit("right"))}
             disabled={!canSplit}
           >
-            Split right
+            <SplitSquareVertical aria-hidden="true" size={15} strokeWidth={1.9} />
           </button>
           <button
+            className="pane-icon-button pane-split-button"
             type="button"
             aria-label={`Split pane ${pane.id} top`}
+            title={`Split pane ${pane.id} top`}
             onClick={stopEvent(() => onSplit("top"))}
             disabled={!canSplit}
           >
-            Split top
-          </button>
-          <button type="button" onClick={stopEvent(onStop)}>
-            Stop
+            <SplitSquareHorizontal aria-hidden="true" size={15} strokeWidth={1.9} />
           </button>
         </div>
       </header>
@@ -718,68 +1026,7 @@ function Pane({
       </div>
 
       <div className="pane-workbench">
-        <section className="publisher" onClick={(event) => event.stopPropagation()}>
-          <header>
-            <span className="eyebrow">Publisher</span>
-            <button
-              className="secondary compact"
-              type="button"
-              onClick={stopEvent(onFormatPayload)}
-            >
-              Format JSON
-            </button>
-          </header>
-          <div className="publisher-fields">
-            <label>
-              <span>Key</span>
-              <input
-                aria-label={`Kafka key for pane ${pane.id}`}
-                placeholder="Optional key"
-                type="text"
-                value={publisher.key}
-                onChange={(event) => onKeyChange(event.currentTarget.value)}
-              />
-            </label>
-            <label>
-              <span>Payload</span>
-              <textarea
-                aria-label={`JSON payload for pane ${pane.id}`}
-                spellCheck={false}
-                value={publisher.payload}
-                onChange={(event) => onPayloadChange(event.currentTarget.value)}
-              />
-            </label>
-          </div>
-          <section className={`producer-status ${publisher.status}`}>
-            <div>
-              <span className="eyebrow">Producer</span>
-              <strong>{producerAckLabel(publisher.ack)}</strong>
-            </div>
-            <small>{publisher.error ?? publisherReadiness}</small>
-          </section>
-          <div className="publisher-footer">
-            <span>{publisher.status === "sending" ? "sending" : "acks=all"}</span>
-            {pane.mode === "poll" ? null : (
-              <button
-                type="button"
-                onClick={stopEvent(onOpenPublisher)}
-                disabled={!pane.topic}
-              >
-                Start poll
-              </button>
-            )}
-            <button
-              className="primary"
-              type="button"
-              onClick={stopEvent(onSend)}
-              disabled={!canSend}
-            >
-              Send
-            </button>
-          </div>
-        </section>
-
-        <section className="consumer">
+        <section className="consumer" aria-label={`Consumer for pane ${pane.id}`}>
           <header>
             <span className="eyebrow">Consumer</span>
             <div className="consumer-controls">
@@ -804,7 +1051,7 @@ function Pane({
                   </select>
                 </label>
               ) : null}
-              <span className={`status-pill ${pane.status}`}>{pane.status}</span>
+              <span className={`status-pill ${pane.status}`}>{compactStatus}</span>
             </div>
           </header>
           <div className="message-stream">
@@ -830,6 +1077,90 @@ function Pane({
               })
             )}
           </div>
+        </section>
+
+        <section
+          className={`publisher ${publisherExpanded ? "expanded" : "collapsed"}`}
+          aria-label={`Publisher for pane ${pane.id}`}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header>
+            <div className="publisher-heading">
+              <span className="eyebrow">Publisher</span>
+              <small>
+                {publisherExpanded ? "Draft editor" : publisher.error ?? publisherReadiness}
+              </small>
+            </div>
+            <button
+              className="secondary compact"
+              type="button"
+              aria-controls={`publisher-panel-${pane.id}`}
+              aria-expanded={publisherExpanded}
+              aria-label={`${publisherExpanded ? "Collapse" : "Expand"} publisher for pane ${pane.id}`}
+              onClick={stopEvent(() =>
+                setPublisherExpanded((expanded) => !expanded),
+              )}
+            >
+              <span>{publisherExpanded ? "Collapse" : "Expand"}</span>
+              {publisherExpanded ? (
+                <ChevronDown aria-hidden="true" size={14} strokeWidth={2} />
+              ) : (
+                <ChevronUp aria-hidden="true" size={14} strokeWidth={2} />
+              )}
+            </button>
+          </header>
+          {publisherExpanded ? (
+            <div className="publisher-panel" id={`publisher-panel-${pane.id}`}>
+              <div className="publisher-tools">
+                <button
+                  className="secondary compact"
+                  type="button"
+                  onClick={stopEvent(onFormatPayload)}
+                >
+                  Format JSON
+                </button>
+              </div>
+              <div className="publisher-fields">
+                <label>
+                  <span>Key</span>
+                  <input
+                    aria-label={`Kafka key for pane ${pane.id}`}
+                    placeholder="Optional key"
+                    type="text"
+                    value={publisher.key}
+                    onChange={(event) => onKeyChange(event.currentTarget.value)}
+                  />
+                </label>
+                <label>
+                  <span>Payload</span>
+                  <textarea
+                    aria-label={`JSON payload for pane ${pane.id}`}
+                    spellCheck={false}
+                    value={publisher.payload}
+                    onChange={(event) => onPayloadChange(event.currentTarget.value)}
+                  />
+                </label>
+              </div>
+              <section className={`producer-status ${publisher.status}`}>
+                <div>
+                  <span className="eyebrow">Producer</span>
+                  <strong>{producerAckLabel(publisher.ack)}</strong>
+                </div>
+                <small>{publisher.error ?? publisherReadiness}</small>
+              </section>
+              <div className="publisher-footer">
+                <span>{publisher.status === "sending" ? "sending" : "acks=all"}</span>
+                <button
+                  className="primary"
+                  type="button"
+                  onClick={stopEvent(onSend)}
+                  disabled={!canSend}
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
       </div>
     </article>
@@ -912,15 +1243,15 @@ function TopicContextMenu({
   menu,
   panes,
   selectedPaneId,
-  onPoll,
-  onPublishPoll,
+  onOpen,
 }: {
   menu: NonNullable<TopicMenuState>;
   panes: WorkspacePane[];
   selectedPaneId: number;
-  onPoll: (paneId: number) => void;
-  onPublishPoll: (paneId: number) => void;
+  onOpen: (placement: TopicOpenPlacement) => void;
 }) {
+  const selectedPane = panes.find((pane) => pane.id === selectedPaneId);
+
   return (
     <div
       className="topic-menu"
@@ -932,27 +1263,64 @@ function TopicContextMenu({
         <span className="eyebrow">Topic actions</span>
         <strong>{menu.topic}</strong>
       </header>
-      {panes.map((pane) => (
-        <div className="topic-menu-row" key={pane.id} role="none">
-          <span>{pane.id === selectedPaneId ? "Selected" : `Pane ${pane.id}`}</span>
-          <button type="button" role="menuitem" onClick={() => onPoll(pane.id)}>
-            Poll
-          </button>
-          <button
-            className="primary"
-            type="button"
-            role="menuitem"
-            onClick={() => onPublishPoll(pane.id)}
-          >
-            Publish
+      {panes.length === 0 ? (
+        <div className="topic-menu-row" role="none">
+          <span>First pane</span>
+          <button type="button" role="menuitem" onClick={() => onOpen("selected")}>
+            Open
           </button>
         </div>
-      ))}
+      ) : (
+        <>
+          <div className="topic-menu-row" role="none">
+            <span>
+              {selectedPane ? `Pane ${selectedPane.id}` : "Selected pane"}
+            </span>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => onOpen("selected")}
+            >
+              Open selected
+            </button>
+          </div>
+          <div className="topic-menu-row" role="none">
+            <span>Split</span>
+            <div className="topic-menu-actions">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => onOpen("right")}
+              >
+                Split right
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => onOpen("top")}
+              >
+                Split top
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => onOpen("bottom")}
+              >
+                Split bottom
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-function formatLayout(layout: string) {
+function formatLayout(layout: string, paneCount: number) {
+  if (paneCount === 0) {
+    return "no panes";
+  }
+
   if (layout === "quad") {
     return "2 x 2";
   }
@@ -1016,6 +1384,29 @@ function publisherReadinessLabel(
   }
 
   return "Ready to publish";
+}
+
+function paneSessionButtonState(pane: WorkspacePane): {
+  action: "poll" | "stop";
+  label: "Poll" | "Stop";
+} {
+  if (pane.mode === "poll" && (pane.status === "loading" || pane.status === "ready")) {
+    return { action: "stop", label: "Stop" };
+  }
+
+  return { action: "poll", label: "Poll" };
+}
+
+function compactPaneStatusLabel(pane: WorkspacePane): string {
+  if (pane.mode === "poll" && pane.status === "loading") {
+    return "Starting";
+  }
+
+  if (pane.mode === "poll" && pane.status === "ready") {
+    return "Polling";
+  }
+
+  return pane.status;
 }
 
 function getTopicPinStore(): TopicPinStore | undefined {

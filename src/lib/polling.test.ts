@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildLatestOnlyConsumerRequest,
+  closePanePollingSession,
   startPanePollingSession,
   stopPanePollingSession,
   type StartConsumerSession,
@@ -97,6 +98,38 @@ describe("pane polling sessions", () => {
       session: null,
       activity: [],
     });
+  });
+
+  it("closes the pane and still reports cleanup failures", async () => {
+    const store = workspaceStore(
+      markPanePollingStarted(
+        markPanePollingStarting(
+          createInitialWorkspaceState(),
+          1,
+          "orders.created",
+        ),
+        1,
+        session("session-1", "group-1", "orders.created"),
+      ),
+    );
+    const onStopError = vi.fn();
+    const stopConsumerSession = vi
+      .fn<StopConsumerSession>()
+      .mockRejectedValue(new Error("client cleanup failed"));
+
+    await closePanePollingSession({
+      paneId: 1,
+      ...store,
+      stopConsumerSession,
+      onStopError,
+    });
+
+    expect(stopConsumerSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+    });
+    expect(onStopError).toHaveBeenCalledWith("client cleanup failed");
+    expect(store.getWorkspace().panes).toEqual([]);
+    expect(store.getWorkspace().selectedPaneId).toBe(0);
   });
 
   it("records unique group ids per pane", async () => {
