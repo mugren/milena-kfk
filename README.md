@@ -1,8 +1,9 @@
 # Milena
 
-Milena is a local macOS developer desktop app for Kafka workflows. The initial
-scaffold is a Tauri v2 application with a React and TypeScript frontend and a
-Rust backend command/event boundary.
+Milena is a local macOS developer desktop app for tactical Kafka workflows. The
+MVP focuses on opening one environment, listing and pinning topics, explicitly
+polling records produced after a session starts, publishing validated JSON, and
+keeping pane-level and global feedback visible.
 
 ## Local Development
 
@@ -10,6 +11,8 @@ Prerequisites:
 
 - Node.js and npm
 - Rust stable toolchain
+- Xcode Command Line Tools
+- Docker Compose for local Kafka smoke checks
 - macOS for the local desktop developer build
 
 Install dependencies:
@@ -29,6 +32,15 @@ Run the local Tauri developer app:
 ```sh
 npm run tauri:dev
 ```
+
+Build the unsigned local macOS app bundle:
+
+```sh
+npm run tauri:build
+```
+
+The expected artifact is
+`src-tauri/target/release/bundle/macos/Milena.app`.
 
 Build the frontend:
 
@@ -61,7 +73,17 @@ See [docs/kafka-integration.md](docs/kafka-integration.md) for the full local
 broker runbook, auth profiles, Rust integration test env vars, and cleanup
 commands.
 
-This scaffold intentionally does not include signing, notarization, Windows, or
-Linux packaging work. The Rust command boundary currently exposes a minimal
-typed preview session and event channel only; Kafka behavior belongs to later
-feature issues.
+See [docs/local-macos-dev-build.md](docs/local-macos-dev-build.md) for the
+complete unsigned macOS build path, runtime prerequisites, and MVP smoke
+checklist.
+
+## MVP Scope Boundaries
+
+The MVP local build intentionally excludes signing, notarization, DMG or PKG
+distribution, App Store distribution, auto-update, Windows builds, and Linux
+builds. Kafka CLI behavior is useful for local verification, but Milena's app
+path uses the native Rust Kafka client behind the Tauri command/event boundary.
+
+Other deferred product areas include schema registry, Avro, Protobuf, publish
+headers, lag views, partition explorers, topic config inspection, automatic
+topic refresh, automatic session restore, and multi-environment workspaces.

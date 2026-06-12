@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -261,6 +262,7 @@ pub fn build_native_client_config(
     entries.insert("sasl.username".to_string(), credentials.username);
     entries.insert("sasl.password".to_string(), credentials.password);
     entries.remove("sasl.jaas.config");
+    resolve_ssl_ca_location(&mut entries);
     if let Some(group_id) = group_id {
         entries.insert("group.id".to_string(), group_id.to_string());
     }
@@ -395,6 +397,37 @@ fn required_property<'a>(auth: &'a RuntimeAuthConfig, key: &str) -> CommandResul
                 "missing required Kafka auth property '{key}'"
             ))
         })
+}
+
+fn resolve_ssl_ca_location(entries: &mut BTreeMap<String, String>) {
+    let Some(ca_location) = entries.get("ssl.ca.location") else {
+        return;
+    };
+    let ca_path = Path::new(ca_location);
+    if ca_path.is_absolute() {
+        return;
+    }
+
+    if let Some(resolved) = resolve_existing_path(ca_path) {
+        entries.insert(
+            "ssl.ca.location".to_string(),
+            resolved.to_string_lossy().into_owned(),
+        );
+    }
+}
+
+fn resolve_existing_path(relative_path: &Path) -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        PathBuf::from(relative_path),
+        manifest_dir.join(relative_path),
+        manifest_dir.join("..").join(relative_path),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
 }
 
 fn normalize_sasl_mechanism(mechanism: &str) -> CommandResult<String> {

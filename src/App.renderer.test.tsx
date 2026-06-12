@@ -96,7 +96,23 @@ afterEach(() => {
 });
 
 describe("App renderer flow harness", () => {
-  it("renders the shell, loads topics, persists pins, selects topics, and recovers through manual refresh", async () => {
+  it("renders the shell without opening a Kafka connection", async () => {
+    renderApp();
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Empty pane" }),
+    ).toBeVisible();
+    expect(screen.getByLabelText("Pane 1")).toHaveTextContent("Inactive");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Inactive");
+    expect(screen.getByText("No topics")).toBeVisible();
+    expect(screen.getByText("localhost:19092")).toBeVisible();
+    expect(tauri.loadAppState).toHaveBeenCalledOnce();
+    expect(tauri.listKafkaTopics).not.toHaveBeenCalled();
+    expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
+    expect(tauri.publishKafkaRecord).not.toHaveBeenCalled();
+  });
+
+  it("loads topics only after manual refresh, persists pins, selects topics, and recovers through another refresh", async () => {
     tauri.listKafkaTopics
       .mockRejectedValueOnce(new Error("SASL auth failed"))
       .mockResolvedValueOnce({ topics });
@@ -107,8 +123,21 @@ describe("App renderer flow harness", () => {
       screen.getByRole("heading", { level: 1, name: "Empty pane" }),
     ).toBeVisible();
     expect(screen.getByLabelText("Pane 1")).toHaveTextContent("Inactive");
+    expect(tauri.listKafkaTopics).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
 
     expect((await screen.findAllByText("SASL auth failed"))[0]).toBeVisible();
+    expect(tauri.listKafkaTopics).toHaveBeenCalledWith({
+      auth: expect.objectContaining({
+        brokers: ["localhost:19092"],
+        properties: expect.objectContaining({
+          "sasl.username": "milena_plain",
+          "sasl.password": "milena-plain-secret",
+          "ssl.ca.location": "docker/kafka/generated/ssl/ca.crt",
+        }),
+      }),
+    });
     expect(screen.getByText("Topic list refresh failed")).toBeVisible();
     expect(queryTopicSelect("orders.created")).not.toBeInTheDocument();
 
@@ -415,6 +444,10 @@ describe("App renderer flow harness", () => {
     ).toBeVisible();
     expect(await screen.findByText("Tauri runtime unavailable")).toBeVisible();
     expect(screen.getByText("invoke missing")).toBeVisible();
+    expect(tauri.listKafkaTopics).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
     expect(screen.getByText("Topic list refresh failed")).toBeVisible();
     expect(screen.getAllByText("IPC unavailable")[0]).toBeVisible();
     expect(unhandled).not.toHaveBeenCalled();
@@ -435,6 +468,10 @@ function renderApp() {
 }
 
 async function loadedTopics() {
+  if (!queryTopicSelect("orders.created")) {
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  }
+
   await waitFor(() => expect(topicSelect("orders.created")).toBeVisible());
 }
 

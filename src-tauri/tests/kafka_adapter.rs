@@ -65,6 +65,31 @@ fn native_config_maps_plain_sasl_ssl_auth_into_librdkafka_entries() {
 }
 
 #[test]
+fn native_config_resolves_relative_ssl_ca_location_before_librdkafka_uses_it() {
+    let mut runtime_auth = auth("PLAIN");
+    runtime_auth.properties.insert(
+        "ssl.ca.location".to_string(),
+        "tests/fixtures/kafka/order_created.json".to_string(),
+    );
+
+    let native = build_native_client_config(&runtime_auth, None)
+        .expect("relative CA locations should map");
+    let ca_location = native
+        .entries()
+        .get("ssl.ca.location")
+        .expect("CA location should be present");
+
+    assert!(
+        ca_location.ends_with("src-tauri/tests/fixtures/kafka/order_created.json"),
+        "expected src-tauri-relative absolute path, got {ca_location}"
+    );
+    assert!(
+        ca_location.starts_with('/'),
+        "expected absolute CA path, got {ca_location}"
+    );
+}
+
+#[test]
 fn native_config_maps_plain_and_scram_mechanisms_and_optional_group_id() {
     for mechanism in ["plain", "SCRAM-SHA-256", "SCRAM-SHA-512"] {
         let native = build_native_client_config(&auth(mechanism), None)

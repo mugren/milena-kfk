@@ -78,12 +78,14 @@ type TopicMenuState = {
 
 const activeRuntimeAuth: RuntimeAuthConfig = {
   environment: "local-dev",
-  brokers: ["localhost:9092"],
+  brokers: ["localhost:19092"],
   properties: {
     "security.protocol": "SASL_SSL",
     "sasl.mechanism": "PLAIN",
-    "sasl.username": "local",
-    "sasl.password": "local",
+    "sasl.username": "milena_plain",
+    "sasl.password": "milena-plain-secret",
+    "ssl.ca.location": "docker/kafka/generated/ssl/ca.crt",
+    "ssl.endpoint.identification.algorithm": "https",
   },
 };
 
@@ -113,7 +115,6 @@ function App() {
           cause instanceof Error ? cause.message : "Tauri runtime unavailable";
         recordGlobalError("app", "Tauri runtime unavailable", message);
       });
-    void loadTopicList(false);
   }, []);
 
   useEffect(() => {
