@@ -780,9 +780,15 @@ describe("App renderer flow harness", () => {
     // @ts-ignore Vitest runs this assertion in Node; the renderer tsconfig has no Node types.
     const { readFileSync } = await import("node:fs");
     const appCss = readFileSync("src/App.css", "utf8");
-    expect(appCss).toMatch(/\.pane-workbench\s*{[^}]*height:\s*100%;[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s);
-    expect(appCss).toMatch(/\.consumer\s*{[^}]*flex:\s*1 0 112px;[^}]*min-height:\s*112px;/s);
-    expect(appCss).toMatch(/\.publisher\s*{[^}]*margin-top:\s*auto;[^}]*flex:\s*0 1 auto;[^}]*max-height:\s*min\(430px,\s*62vh,\s*calc\(100% - 112px\)\);[^}]*overflow:\s*hidden;/s);
+    expect(paneOne.querySelector(".pane-workbench")).toHaveClass(
+      "has-collapsed-publisher",
+    );
+    expect(appCss).toMatch(/\.pane\s*{[^}]*grid-template-rows:\s*auto auto 1fr;/s);
+    expect(appCss).toMatch(/\.pane\.has-error\s*{[^}]*grid-template-rows:\s*auto auto auto 1fr;/s);
+    expect(appCss).toMatch(/\.pane-workbench\s*{[^}]*position:\s*relative;[^}]*--publisher-reserved-height:\s*58px;[^}]*height:\s*100%;/s);
+    expect(appCss).toMatch(/\.pane-workbench\.has-expanded-publisher\s*{[^}]*--publisher-reserved-height:\s*min\(430px,\s*62vh,\s*calc\(100% - 112px\)\);/s);
+    expect(appCss).toMatch(/\.consumer\s*{[^}]*height:\s*100%;[^}]*padding-bottom:\s*var\(--publisher-reserved-height\);/s);
+    expect(appCss).toMatch(/\.publisher\s*{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*bottom:\s*0;[^}]*left:\s*0;[^}]*max-height:\s*var\(--publisher-reserved-height\);[^}]*overflow:\s*hidden;/s);
     expect(within(paneOne).getByRole("button", { name: "Poll" })).toBeVisible();
     expect(
       within(paneOne).getByLabelText("Render mode for orders.created"),
@@ -794,6 +800,9 @@ describe("App renderer flow harness", () => {
       within(publisher).getByRole("button", {
         name: "Expand publisher for pane 1",
       }),
+    );
+    expect(paneOne.querySelector(".pane-workbench")).toHaveClass(
+      "has-expanded-publisher",
     );
     const key = screen.getByLabelText("Kafka key for pane 1");
     const payload = screen.getByLabelText("JSON payload for pane 1");
@@ -899,6 +908,7 @@ describe("App renderer flow harness", () => {
 
     expect(await screen.findByText("invalid JSON")).toBeVisible();
     expect(screen.getByText("{\"id\":")).toBeVisible();
+    expect(messageRowButton("orders.created")).toHaveClass("has-key");
 
     await user.selectOptions(
       screen.getByLabelText("Render mode for orders.created"),
@@ -917,6 +927,36 @@ describe("App renderer flow harness", () => {
     expect(screen.getByLabelText("Kafka headers")).toHaveTextContent("trace-id");
     expect(screen.getByLabelText("Kafka headers")).toHaveTextContent("abc");
     expect(screen.getByText("key order-42")).toBeVisible();
+  });
+
+  it("uses the wide payload preview column for records without keys", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-1");
+
+    emit("session-1", kafkaRecord("session-1", {
+      offset: 39,
+      payload: JSON.stringify({
+        topic: "orders.created",
+        event: "preview",
+        shape: "wide summary row",
+      }),
+    }));
+
+    const summary = messageRowButton("orders.created");
+    expect(summary).toHaveClass("no-key");
+    expect(summary).not.toHaveClass("has-key");
+    expect(within(summary).queryByText(/^key /)).not.toBeInTheDocument();
+    expect(summary).toHaveTextContent("wide summary row");
+
+    // @ts-ignore Vitest runs this assertion in Node; the renderer tsconfig has no Node types.
+    const { readFileSync } = await import("node:fs");
+    const appCss = readFileSync("src/App.css", "utf8");
+    expect(appCss).toMatch(/\.message-row-summary\.no-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(180px,\s*1fr\) minmax\(58px,\s*auto\) minmax\(0,\s*2fr\);/s);
+    expect(appCss).toMatch(/\.message-row-summary\.has-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(160px,\s*0\.9fr\) minmax\(58px,\s*auto\) minmax\(70px,\s*0\.45fr\) minmax\(0,\s*1\.65fr\);/s);
+    expect(appCss).toMatch(/\.message-preview code\s*{[^}]*min-width:\s*0;[^}]*flex:\s*1 1 auto;/s);
   });
 
   it("opens and closes the topic open menu and routes actions to panes", async () => {

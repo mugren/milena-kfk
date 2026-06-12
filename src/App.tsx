@@ -1025,7 +1025,11 @@ export function Pane({
         </div>
       </div>
 
-      <div className="pane-workbench">
+      <div
+        className={`pane-workbench ${
+          publisherExpanded ? "has-expanded-publisher" : "has-collapsed-publisher"
+        }`}
+      >
         <section className="consumer" aria-label={`Consumer for pane ${pane.id}`}>
           <header>
             <span className="eyebrow">Consumer</span>
@@ -1185,7 +1189,7 @@ function MessageStreamRow({
         .join(" ")}
     >
       <button
-        className="message-row-summary"
+        className={`message-row-summary ${message.key ? "has-key" : "no-key"}`}
         type="button"
         aria-expanded={message.expanded}
         onClick={stopEvent(onToggle)}
