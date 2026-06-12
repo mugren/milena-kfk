@@ -47,6 +47,7 @@ export type SendPublisherRecordOptions = {
   getPublisherState: () => PublisherState;
   updatePublisherState: PublisherUpdate;
   publishRecord: PublishRecord;
+  onError?: (error: string) => void;
   now?: () => Date;
 };
 
@@ -209,6 +210,7 @@ export async function sendPublisherRecord({
   getPublisherState,
   updatePublisherState,
   publishRecord,
+  onError,
   now = () => new Date(),
 }: SendPublisherRecordOptions): Promise<PublishKafkaRecordResponse | null> {
   const workspace = getWorkspace();
@@ -238,14 +240,12 @@ export async function sendPublisherRecord({
     );
     return ack;
   } catch (cause) {
+    const message =
+      cause instanceof Error ? cause.message : "Kafka publish failed";
     updatePublisherState((current) =>
-      setPublisherError(
-        current,
-        paneId,
-        publisher,
-        cause instanceof Error ? cause.message : "Kafka publish failed",
-      ),
+      setPublisherError(current, paneId, publisher, message),
     );
+    onError?.(message);
     return null;
   }
 }

@@ -107,6 +107,7 @@ describe("publisher pane flow", () => {
       ),
     );
     const publishRecord = vi.fn<PublishRecord>();
+    const onError = vi.fn();
 
     const result = await sendPublisherRecord({
       paneId: 1,
@@ -114,6 +115,7 @@ describe("publisher pane flow", () => {
       ...workspace,
       ...publisher,
       publishRecord,
+      onError,
     });
 
     const draft = getPublisherPaneState(
@@ -125,6 +127,7 @@ describe("publisher pane flow", () => {
     expect(publishRecord).not.toHaveBeenCalled();
     expect(draft.status).toBe("error");
     expect(draft.error).toBe("Payload must be valid JSON");
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("sends an optional Kafka message key when provided", async () => {
@@ -179,6 +182,7 @@ describe("publisher pane flow", () => {
       offset: 7,
       status: "delivered",
     });
+    const onError = vi.fn();
 
     await sendPublisherRecord({
       paneId: 1,
@@ -186,6 +190,7 @@ describe("publisher pane flow", () => {
       ...workspace,
       ...publisher,
       publishRecord,
+      onError,
       now: () => new Date("2026-06-12T12:00:00.000Z"),
     });
 
@@ -205,9 +210,10 @@ describe("publisher pane flow", () => {
       sentAt: "2026-06-12T12:00:00.000Z",
     });
     expect(pane.activity).toEqual([]);
+    expect(onError).not.toHaveBeenCalled();
   });
 
-  it("keeps send errors in producer status without adding consumer feedback", async () => {
+  it("keeps send errors in producer status and reports a global error callback", async () => {
     const workspace = workspaceStore(readyWorkspace());
     const publisher = publisherStore(
       setPublisherPayload(
@@ -219,6 +225,7 @@ describe("publisher pane flow", () => {
     const publishRecord = vi
       .fn<PublishRecord>()
       .mockRejectedValue(new Error("broker rejected produce"));
+    const onError = vi.fn();
 
     const result = await sendPublisherRecord({
       paneId: 1,
@@ -226,6 +233,7 @@ describe("publisher pane flow", () => {
       ...workspace,
       ...publisher,
       publishRecord,
+      onError,
     });
 
     const draft = getPublisherPaneState(
@@ -239,6 +247,7 @@ describe("publisher pane flow", () => {
     expect(draft.error).toBe("broker rejected produce");
     expect(draft.ack).toBeNull();
     expect(workspace.getWorkspace().panes[0].activity).toEqual([]);
+    expect(onError).toHaveBeenCalledWith("broker rejected produce");
   });
 
   it("omits the Kafka message key when the key field is blank", () => {

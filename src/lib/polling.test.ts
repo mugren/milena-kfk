@@ -136,6 +136,7 @@ describe("pane polling sessions", () => {
 
   it("isolates one pane failure from another active poll", async () => {
     const store = workspaceStore(splitPane(createInitialWorkspaceState(), 1, "right"));
+    const onError = vi.fn();
     const startConsumerSession = vi
       .fn<StartConsumerSession>()
       .mockRejectedValueOnce(new Error("broker unavailable"))
@@ -151,6 +152,7 @@ describe("pane polling sessions", () => {
         auth,
         ...store,
         startConsumerSession,
+        onError,
       }),
       startPanePollingSession({
         paneId: 2,
@@ -164,10 +166,83 @@ describe("pane polling sessions", () => {
     const [failedPane, activePane] = store.getWorkspace().panes;
     expect(failedPane.status).toBe("error");
     expect(failedPane.error).toBe("broker unavailable");
+    expect(onError).toHaveBeenCalledWith("broker unavailable");
     expect(activePane.status).toBe("ready");
     expect(activePane.consumerGroup).toBe("group-2");
     expect(activePane.activity).toHaveLength(1);
     expect(recordOffset(activePane.activity[0])).toBe(9);
+  });
+
+  it("renders runtime consumer errors on the affected pane only", async () => {
+    const store = workspaceStore(splitPane(createInitialWorkspaceState(), 1, "right"));
+    let emitPaneOne: (event: MilenaBoundaryEvent) => void = () => {
+      throw new Error("pane one event emitter was not captured");
+    };
+    const startConsumerSession = vi
+      .fn<StartConsumerSession>()
+      .mockImplementationOnce(async (_request, onEvent) => {
+        emitPaneOne = onEvent;
+        return session("session-1", "group-1", "orders.created");
+      })
+      .mockResolvedValueOnce(
+        session("session-2", "group-2", "payments.authorized"),
+      );
+
+    await startPanePollingSession({
+      paneId: 1,
+      topic: "orders.created",
+      auth,
+      ...store,
+      startConsumerSession,
+    });
+    await startPanePollingSession({
+      paneId: 2,
+      topic: "payments.authorized",
+      auth,
+      ...store,
+      startConsumerSession,
+    });
+
+    emitPaneOne(consumerError("session-1", "broker heartbeat failed"));
+
+    const [failedPane, activePane] = store.getWorkspace().panes;
+    expect(failedPane.status).toBe("error");
+    expect(failedPane.error).toBe("broker heartbeat failed");
+    expect(failedPane.activity).toHaveLength(1);
+    expect(activePane.status).toBe("ready");
+    expect(activePane.error).toBeNull();
+  });
+
+  it("reports cleanup failures without restoring a stopped pane", async () => {
+    const store = workspaceStore(
+      markPanePollingStarted(
+        markPanePollingStarting(
+          createInitialWorkspaceState(),
+          1,
+          "orders.created",
+        ),
+        1,
+        session("session-1", "group-1", "orders.created"),
+      ),
+    );
+    const onStopError = vi.fn();
+    const stopConsumerSession = vi
+      .fn<StopConsumerSession>()
+      .mockRejectedValue(new Error("client cleanup failed"));
+
+    await stopPanePollingSession({
+      paneId: 1,
+      ...store,
+      stopConsumerSession,
+      onStopError,
+    });
+
+    expect(onStopError).toHaveBeenCalledWith("client cleanup failed");
+    expect(store.getWorkspace().panes[0]).toMatchObject({
+      mode: "idle",
+      status: "idle",
+      session: null,
+    });
   });
 });
 
@@ -221,6 +296,16 @@ function record(sessionId: string, offset: number): MilenaBoundaryEvent {
         key: null,
         payload: `{"offset":${offset}}`,
       },
+    },
+  };
+}
+
+function consumerError(sessionId: string, message: string): MilenaBoundaryEvent {
+  return {
+    event: "kafkaConsumerError",
+    data: {
+      sessionId,
+      message,
     },
   };
 }

@@ -482,6 +482,12 @@ button:disabled {
   margin: 8px 10px;
 }
 
+.error-strip.pane-error {
+  border-color: rgba(184, 50, 59, 0.18);
+  background: rgba(255, 245, 246, 0.62);
+  color: #8c343b;
+}
+
 .session-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -920,6 +926,10 @@ code {
   border-top: 1px solid var(--line);
 }
 
+.activity-log p.activity-error {
+  background: rgba(255, 245, 246, 0.54);
+}
+
 .activity-log p:first-of-type {
   border-top: 0;
 }
@@ -927,6 +937,19 @@ code {
 .activity-log strong {
   color: var(--blue);
   font-size: 10px;
+}
+
+.activity-log p.activity-error strong {
+  color: var(--red);
+}
+
+.activity-log small {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 1180px) {

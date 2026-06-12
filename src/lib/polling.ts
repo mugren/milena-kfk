@@ -39,6 +39,7 @@ export type PanePollingOptions = {
   stopConsumerSession?: StopConsumerSession;
   isCurrent?: () => boolean;
   onEvent?: (event: MilenaBoundaryEvent) => void;
+  onError?: (error: string) => void;
   onStopError?: (error: string) => void;
   now?: () => Date;
 };
@@ -72,6 +73,7 @@ export async function startPanePollingSession({
   stopConsumerSession,
   isCurrent = () => true,
   onEvent,
+  onError,
   onStopError,
   now = () => new Date(),
 }: PanePollingOptions): Promise<KafkaConsumerSession | null> {
@@ -95,9 +97,14 @@ export async function startPanePollingSession({
         }
 
         const receivedEvent = stampKafkaRecordReceivedAt(event, now());
-        updateWorkspace((current) =>
-          appendPaneActivity(current, paneId, receivedEvent),
-        );
+        updateWorkspace((current) => {
+          const next = appendPaneActivity(current, paneId, receivedEvent);
+          if (receivedEvent.event !== "kafkaConsumerError") {
+            return next;
+          }
+
+          return markPaneError(next, paneId, receivedEvent.data.message);
+        });
         onEvent?.(receivedEvent);
       },
     );
@@ -122,6 +129,7 @@ export async function startPanePollingSession({
       cause instanceof Error ? cause.message : "Kafka consumer session failed";
     if (isCurrent()) {
       updateWorkspace((current) => markPaneError(current, paneId, message));
+      onError?.(message);
     }
     return null;
   }

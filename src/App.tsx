@@ -1,14 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   AppState,
-  MilenaBoundaryEvent,
   RuntimeAuthConfig,
   listKafkaTopics,
   loadAppState,
   publishKafkaRecord,
   startKafkaConsumerSession,
   stopKafkaConsumerSession,
+  type MilenaBoundaryEvent,
 } from "./lib/tauri";
+import {
+  appendBoundaryEventActivity,
+  appendGlobalError,
+  clearGlobalActivity,
+  type GlobalActivityEntry,
+  type GlobalActivitySource,
+} from "./lib/activity";
 import {
   startPanePollingSession,
   stopPanePollingSession,
@@ -63,11 +70,6 @@ import {
   type WorkspaceState,
 } from "./lib/workspace";
 
-type ActivityEntry = MilenaBoundaryEvent & {
-  paneId: number;
-  time: string;
-};
-
 type TopicMenuState = {
   topic: string;
   x: number;
@@ -97,8 +99,7 @@ function App() {
   const [publisherState, setPublisherState] = useState(
     createInitialPublisherState,
   );
-  const [activity, setActivity] = useState<ActivityEntry[]>([]);
-  const [appError, setAppError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<GlobalActivityEntry[]>([]);
   const [topicMenu, setTopicMenu] = useState<TopicMenuState>(null);
   const requestedTopicLoads = useRef(new Set<string>());
   const workspaceRef = useRef(workspace);
@@ -110,7 +111,7 @@ function App() {
       .catch((cause: unknown) => {
         const message =
           cause instanceof Error ? cause.message : "Tauri runtime unavailable";
-        setAppError(message);
+        recordGlobalError("app", "Tauri runtime unavailable", message);
       });
     void loadTopicList(false);
   }, []);
@@ -179,6 +180,7 @@ function App() {
       const message =
         cause instanceof Error ? cause.message : "Topic list refresh failed";
       setTopicRail((current) => markTopicLoadFailed(current, key, message));
+      recordGlobalError("topics", "Topic list refresh failed", message);
     }
   }
 
@@ -218,13 +220,13 @@ function App() {
       isCurrent: () => pollingRuns.current.get(paneId) === run,
       onEvent: (event) => {
         setActivity((current) =>
-          [
-            { ...event, paneId, time: new Date().toLocaleTimeString() },
-            ...current,
-          ].slice(0, 10),
+          appendBoundaryEventActivity(current, event, paneId),
         );
       },
-      onStopError: setAppError,
+      onError: (message) =>
+        recordGlobalError("consumer", "Consumer session failed", message, paneId),
+      onStopError: (message) =>
+        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
     });
   }
 
@@ -243,13 +245,13 @@ function App() {
       isCurrent: () => pollingRuns.current.get(paneId) === run,
       onEvent: (event) => {
         setActivity((current) =>
-          [
-            { ...event, paneId, time: new Date().toLocaleTimeString() },
-            ...current,
-          ].slice(0, 10),
+          appendBoundaryEventActivity(current, event, paneId),
         );
       },
-      onStopError: setAppError,
+      onError: (message) =>
+        recordGlobalError("consumer", "Consumer session failed", message, paneId),
+      onStopError: (message) =>
+        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
     });
   }
 
@@ -264,7 +266,8 @@ function App() {
       getWorkspace: () => workspaceRef.current,
       updateWorkspace,
       stopConsumerSession: stopKafkaConsumerSession,
-      onStopError: setAppError,
+      onStopError: (message) =>
+        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
     });
   }
 
@@ -314,6 +317,8 @@ function App() {
       getPublisherState: () => publisherState,
       updatePublisherState,
       publishRecord: publishKafkaRecord,
+      onError: (message) =>
+        recordGlobalError("producer", "Publish failed", message, paneId),
     });
   }
 
@@ -326,6 +331,21 @@ function App() {
   function openTopicMenu(event: MouseEvent<HTMLDivElement>, topic: string) {
     event.preventDefault();
     setTopicMenu({ topic, x: event.clientX, y: event.clientY });
+  }
+
+  function recordGlobalError(
+    source: GlobalActivitySource,
+    message: string,
+    detail: string,
+    paneId: number | null = null,
+  ) {
+    setActivity((current) =>
+      appendGlobalError(current, source, message, { detail, paneId }),
+    );
+  }
+
+  function clearActivityLog() {
+    setActivity(clearGlobalActivity());
   }
 
   return (
@@ -513,7 +533,6 @@ function App() {
             <strong>{formatLayout(workspace.layout)}</strong>
           </div>
         </section>
-        {appError ? <div className="error-strip compact">{appError}</div> : null}
         <section className="split-rules">
           <header>
             <span className="eyebrow">Capabilities</span>
@@ -526,19 +545,25 @@ function App() {
         </section>
         <section className="activity-log">
           <header>
-            <span className="eyebrow">Events</span>
-            <button type="button" onClick={() => setActivity([])}>
+            <span className="eyebrow">Activity & errors</span>
+            <button type="button" onClick={clearActivityLog}>
               Clear
             </button>
           </header>
           {activity.length === 0 ? (
             <p>Inactive</p>
           ) : (
-            activity.map((event, index) => (
-              <p key={`${event.event}-log-${index}`}>
+            activity.map((event) => (
+              <p
+                className={event.severity === "error" ? "activity-error" : ""}
+                key={event.id}
+              >
                 <span>{event.time}</span>
-                <strong>P{event.paneId}</strong>
-                {event.event}
+                <strong>{event.paneId ? `P${event.paneId}` : event.source}</strong>
+                <span>
+                  {event.message}
+                  {event.detail ? <small>{event.detail}</small> : null}
+                </span>
               </p>
             ))
           )}
@@ -671,7 +696,9 @@ function Pane({
         </div>
       </header>
 
-      {pane.error ? <div className="error-strip">{pane.error}</div> : null}
+      {pane.error ? (
+        <div className="error-strip pane-error">{pane.error}</div>
+      ) : null}
 
       <div className="session-grid">
         <div className="stat-cell">
