@@ -5,10 +5,12 @@ use std::{
 };
 
 use milena_lib::{
-    contracts::{MilenaCommandErrorCode, SaveEnvironmentRequest},
+    contracts::{
+        CommandResult, MilenaCommandError, MilenaCommandErrorCode, SaveEnvironmentRequest,
+    },
     environments::{
         load_environment, materialize_runtime_auth_config, save_environment,
-        InMemoryEnvironmentSecretStore,
+        EnvironmentSecretStore, InMemoryEnvironmentSecretStore,
     },
 };
 
@@ -117,6 +119,233 @@ fn missing_keychain_secret_fails_runtime_materialization() {
     assert!(error.message.contains(&saved.password_secret_ref));
 
     let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn environment_save_validates_required_fields_and_drops_blank_brokers() {
+    let config_dir = temp_config_dir("validation");
+    let secrets = InMemoryEnvironmentSecretStore::default();
+
+    for (request, code) in [
+        (
+            SaveEnvironmentRequest {
+                name: " ".to_string(),
+                brokers: vec!["localhost:9092".to_string()],
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                auth_properties_template: auth_template(),
+            },
+            MilenaCommandErrorCode::EnvironmentNameRequired,
+        ),
+        (
+            SaveEnvironmentRequest {
+                name: "dev".to_string(),
+                brokers: vec![" ".to_string(), "".to_string()],
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                auth_properties_template: auth_template(),
+            },
+            MilenaCommandErrorCode::EnvironmentBrokersRequired,
+        ),
+        (
+            SaveEnvironmentRequest {
+                name: "dev".to_string(),
+                brokers: vec!["localhost:9092".to_string()],
+                username: " ".to_string(),
+                password: "secret".to_string(),
+                auth_properties_template: auth_template(),
+            },
+            MilenaCommandErrorCode::EnvironmentUsernameRequired,
+        ),
+        (
+            SaveEnvironmentRequest {
+                name: "dev".to_string(),
+                brokers: vec!["localhost:9092".to_string()],
+                username: "alice".to_string(),
+                password: "".to_string(),
+                auth_properties_template: auth_template(),
+            },
+            MilenaCommandErrorCode::EnvironmentPasswordRequired,
+        ),
+        (
+            SaveEnvironmentRequest {
+                name: "dev".to_string(),
+                brokers: vec!["localhost:9092".to_string()],
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                auth_properties_template: " \n ".to_string(),
+            },
+            MilenaCommandErrorCode::EnvironmentAuthTemplateRequired,
+        ),
+    ] {
+        let error = save_environment(&config_dir, request, &secrets)
+            .expect_err("invalid environment should fail validation");
+        assert_eq!(error.code, code);
+    }
+
+    let saved = save_environment(
+        &config_dir,
+        SaveEnvironmentRequest {
+            name: " Trimmed Dev ".to_string(),
+            brokers: vec![
+                " kafka-a:9092 ".to_string(),
+                " ".to_string(),
+                "kafka-b:9092".to_string(),
+            ],
+            username: " alice ".to_string(),
+            password: "secret".to_string(),
+            auth_properties_template: auth_template(),
+        },
+        &secrets,
+    )
+    .expect("valid environment should save");
+    assert_eq!(saved.name, "Trimmed Dev");
+    assert_eq!(saved.brokers, vec!["kafka-a:9092", "kafka-b:9092"]);
+    assert_eq!(saved.username, "alice");
+
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn missing_environment_lookup_returns_not_found() {
+    let config_dir = temp_config_dir("missing-environment");
+
+    let error = load_environment(&config_dir, "missing")
+        .expect_err("missing environment should return a command error");
+
+    assert_eq!(error.code, MilenaCommandErrorCode::EnvironmentNotFound);
+    assert!(error.message.contains("missing"));
+
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn secret_store_save_failure_does_not_write_metadata_or_leak_password() {
+    let config_dir = temp_config_dir("secret-save-failure");
+
+    let error = save_environment(
+        &config_dir,
+        SaveEnvironmentRequest {
+            name: "dev".to_string(),
+            brokers: vec!["localhost:9092".to_string()],
+            username: "alice".to_string(),
+            password: "super-secret".to_string(),
+            auth_properties_template: auth_template(),
+        },
+        &FailingSaveSecretStore,
+    )
+    .expect_err("secret store failure should fail save");
+
+    assert_eq!(
+        error.code,
+        MilenaCommandErrorCode::EnvironmentSecretStoreFailed
+    );
+    assert!(
+        !config_dir.join("environments").exists(),
+        "metadata should not be persisted when secret storage fails"
+    );
+
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn runtime_auth_parser_handles_comments_separators_and_duplicate_keys() {
+    let config_dir = temp_config_dir("auth-parser");
+    let secrets = InMemoryEnvironmentSecretStore::default();
+
+    save_environment(
+        &config_dir,
+        SaveEnvironmentRequest {
+            name: "dev".to_string(),
+            brokers: vec!["localhost:9092".to_string()],
+            username: "service-user".to_string(),
+            password: "service-pass".to_string(),
+            auth_properties_template: [
+                "# comment",
+                "! also a comment",
+                "",
+                "security.protocol = PLAINTEXT",
+                "security.protocol: SASL_SSL",
+                "sasl.username=$KAFKA_USER",
+                "sasl.password:${KAFKA_PASS}",
+            ]
+            .join("\n"),
+        },
+        &secrets,
+    )
+    .expect("environment should save");
+
+    let runtime = materialize_runtime_auth_config(&config_dir, "dev", &secrets)
+        .expect("runtime auth config should parse");
+
+    assert_eq!(
+        runtime.properties.get("security.protocol"),
+        Some(&"SASL_SSL".to_string()),
+        "duplicate keys should use the last value, matching Java properties behavior"
+    );
+    assert_eq!(
+        runtime.properties.get("sasl.username"),
+        Some(&"service-user".to_string())
+    );
+    assert_eq!(
+        runtime.properties.get("sasl.password"),
+        Some(&"service-pass".to_string())
+    );
+
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
+fn runtime_auth_parser_rejects_invalid_lines_and_empty_keys() {
+    for (test_name, template, expected_message) in [
+        (
+            "invalid-line",
+            "security.protocol SASL_SSL",
+            "missing a key/value separator",
+        ),
+        ("empty-key", " = SASL_SSL", "empty key"),
+    ] {
+        let config_dir = temp_config_dir(test_name);
+        let secrets = InMemoryEnvironmentSecretStore::default();
+
+        save_environment(
+            &config_dir,
+            SaveEnvironmentRequest {
+                name: "dev".to_string(),
+                brokers: vec!["localhost:9092".to_string()],
+                username: "service-user".to_string(),
+                password: "service-pass".to_string(),
+                auth_properties_template: template.to_string(),
+            },
+            &secrets,
+        )
+        .expect("environment should save before runtime parsing");
+
+        let error = materialize_runtime_auth_config(&config_dir, "dev", &secrets)
+            .expect_err("invalid auth template should fail materialization");
+
+        assert_eq!(
+            error.code,
+            MilenaCommandErrorCode::EnvironmentAuthTemplateInvalid
+        );
+        assert!(error.message.contains(expected_message));
+
+        let _ = fs::remove_dir_all(config_dir);
+    }
+}
+
+struct FailingSaveSecretStore;
+
+impl EnvironmentSecretStore for FailingSaveSecretStore {
+    fn save_password(&self, _secret_ref: &str, _password: &str) -> CommandResult<()> {
+        Err(MilenaCommandError::environment_secret_store_failed(
+            "keychain unavailable",
+        ))
+    }
+
+    fn load_password(&self, _secret_ref: &str) -> CommandResult<Option<String>> {
+        Ok(None)
+    }
 }
 
 fn auth_template() -> String {

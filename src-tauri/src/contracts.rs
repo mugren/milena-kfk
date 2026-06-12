@@ -7,7 +7,7 @@ pub const CAPABILITIES: &[MilenaCapability] = &[
     MilenaCapability::MacosDevBuild,
 ];
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum MilenaCapability {
     CommandBoundary,
@@ -15,7 +15,7 @@ pub enum MilenaCapability {
     MacosDevBuild,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
     pub app_name: String,
@@ -24,7 +24,7 @@ pub struct AppState {
     pub capabilities: Vec<MilenaCapability>,
 }
 
-#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicSessionPreviewRequest {
     pub topic: String,
@@ -38,7 +38,7 @@ pub enum TopicSessionMode {
     Publish,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicSessionPreview {
     pub session_id: String,
@@ -47,7 +47,7 @@ pub struct TopicSessionPreview {
     pub status: String,
 }
 
-#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveEnvironmentRequest {
     pub name: String,
@@ -57,7 +57,7 @@ pub struct SaveEnvironmentRequest {
     pub auth_properties_template: String,
 }
 
-#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportKafkaShellEnvironmentRequest {
     pub environment_name: String,
@@ -89,26 +89,26 @@ pub struct RuntimeAuthConfig {
     pub properties: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ListKafkaTopicsRequest {
     pub auth: RuntimeAuthConfig,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaTopicList {
     pub topics: Vec<KafkaTopicMetadata>,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaTopicMetadata {
     pub name: String,
     pub partition_count: i32,
 }
 
-#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishKafkaRecordRequest {
     pub auth: RuntimeAuthConfig,
@@ -117,7 +117,7 @@ pub struct PublishKafkaRecordRequest {
     pub payload: String,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishKafkaRecordResponse {
     pub topic: String,
@@ -126,7 +126,7 @@ pub struct PublishKafkaRecordResponse {
     pub status: String,
 }
 
-#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StartKafkaConsumerSessionRequest {
     pub auth: RuntimeAuthConfig,
@@ -135,13 +135,13 @@ pub struct StartKafkaConsumerSessionRequest {
     pub from_beginning: bool,
 }
 
-#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StopKafkaConsumerSessionRequest {
     pub session_id: String,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaConsumerSession {
     pub session_id: String,
@@ -150,7 +150,7 @@ pub struct KafkaConsumerSession {
     pub status: String,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StopKafkaConsumerSessionResponse {
     pub session_id: String,
@@ -159,7 +159,7 @@ pub struct StopKafkaConsumerSessionResponse {
     pub cleanup: KafkaConsumerGroupCleanupAttempt,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaConsumerGroupCleanupAttempt {
     pub group_id: String,
@@ -168,7 +168,7 @@ pub struct KafkaConsumerGroupCleanupAttempt {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaRecordEvent {
     pub session_id: String,
@@ -179,7 +179,7 @@ pub struct KafkaRecordEvent {
     pub payload: Option<String>,
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -216,7 +216,7 @@ pub enum MilenaBoundaryEvent {
 
 pub type CommandResult<T> = Result<T, MilenaCommandError>;
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct MilenaCommandError {
     pub code: MilenaCommandErrorCode,
@@ -332,7 +332,10 @@ impl MilenaCommandError {
     pub fn kafka_session_not_found(session_id: impl ToString) -> Self {
         Self {
             code: MilenaCommandErrorCode::KafkaSessionNotFound,
-            message: format!("Kafka consumer session '{}' was not found", session_id.to_string()),
+            message: format!(
+                "Kafka consumer session '{}' was not found",
+                session_id.to_string()
+            ),
         }
     }
 
@@ -344,7 +347,7 @@ impl MilenaCommandError {
     }
 }
 
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum MilenaCommandErrorCode {
     TopicRequired,

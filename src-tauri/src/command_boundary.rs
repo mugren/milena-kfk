@@ -2,10 +2,10 @@ use tauri::ipc::Channel;
 
 use crate::contracts::{
     AppState, CommandResult, KafkaConsumerSession, KafkaTopicList, ListKafkaTopicsRequest,
-    MilenaBoundaryEvent, MilenaCommandError, PublishKafkaRecordRequest,
-    PublishKafkaRecordResponse, StartKafkaConsumerSessionRequest,
-    StopKafkaConsumerSessionRequest, StopKafkaConsumerSessionResponse, TopicSessionMode,
-    TopicSessionPreview, TopicSessionPreviewRequest, CAPABILITIES,
+    MilenaBoundaryEvent, MilenaCommandError, PublishKafkaRecordRequest, PublishKafkaRecordResponse,
+    StartKafkaConsumerSessionRequest, StopKafkaConsumerSessionRequest,
+    StopKafkaConsumerSessionResponse, TopicSessionMode, TopicSessionPreview,
+    TopicSessionPreviewRequest, CAPABILITIES,
 };
 use crate::kafka_adapter::KafkaAdapter;
 

@@ -61,7 +61,9 @@ impl KafkaAdapter for NativeKafkaAdapter {
     fn list_topics(&self, auth: &RuntimeAuthConfig) -> CommandResult<Vec<KafkaTopicMetadata>> {
         let native = build_native_client_config(auth, None)?;
         let consumer: StreamConsumer = native.client_config().create().map_err(|error| {
-            MilenaCommandError::kafka_operation_failed(format!("failed to create Kafka client: {error}"))
+            MilenaCommandError::kafka_operation_failed(format!(
+                "failed to create Kafka client: {error}"
+            ))
         })?;
         let metadata = consumer
             .fetch_metadata(None, Duration::from_secs(10))
@@ -291,10 +293,9 @@ pub fn cleanup_consumer_group(
             })?;
         let options = AdminOptions::new().operation_timeout(Some(Duration::from_secs(5)));
         let groups = [group_id];
-        let results = tauri::async_runtime::block_on(async {
-            admin.delete_groups(&groups, &options).await
-        })
-        .map_err(|error| MilenaCommandError::kafka_operation_failed(error))?;
+        let results =
+            tauri::async_runtime::block_on(async { admin.delete_groups(&groups, &options).await })
+                .map_err(|error| MilenaCommandError::kafka_operation_failed(error))?;
 
         for result in results {
             if let Err((name, error)) = result {
@@ -438,9 +439,7 @@ fn parse_jaas_credentials(jaas: &str) -> CommandResult<KafkaCredentials> {
 fn parse_jaas_assignment(jaas: &str, key: &str) -> CommandResult<String> {
     let needle = format!("{key}=");
     let start = jaas.find(&needle).ok_or_else(|| {
-        MilenaCommandError::kafka_auth_unsupported(format!(
-            "sasl.jaas.config is missing '{key}'"
-        ))
+        MilenaCommandError::kafka_auth_unsupported(format!("sasl.jaas.config is missing '{key}'"))
     })? + needle.len();
     let remainder = jaas[start..].trim_start();
 
