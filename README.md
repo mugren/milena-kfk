@@ -43,11 +43,18 @@ cd src-tauri
 cargo test
 ```
 
-Run the local Kafka integration broker and issue #16 HITL verification checks:
+Run the local Kafka integration broker and issue #14 HITL verification checks:
 
 ```sh
 npm run kafka:up
 npm run kafka:check
+```
+
+Run approved E2E scenarios and review the generated actual Markdown:
+
+```sh
+npm run e2e:scenarios -- list
+npm run e2e:scenarios -- run kafka-all
 ```
 
 See [docs/kafka-integration.md](docs/kafka-integration.md) for the full local

@@ -16,7 +16,8 @@
     "kafka:reset": "scripts/kafka-reset",
     "kafka:smoke": "scripts/kafka-smoke",
     "kafka:test": "scripts/kafka-test",
-    "kafka:check": "scripts/kafka-check"
+    "kafka:check": "scripts/kafka-check",
+    "e2e:scenarios": "node scripts/e2e-scenarios.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

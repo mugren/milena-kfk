@@ -2,6 +2,7 @@ prototype/
 kafka-shell
 node_modules/
 dist/
+.tmp/
 src-tauri/target/
 src-tauri/gen/
 spec/

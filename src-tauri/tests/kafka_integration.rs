@@ -124,7 +124,7 @@ fn publish_ack_and_consumed_records_preserve_unkeyed_and_keyed_json() {
     assert_eq!(unkeyed_record.key, None);
     stop_session(&adapter, &events, &unkeyed_session.session_id);
 
-    let keyed_key = format!("issue-16-keyed-{test_id}");
+    let keyed_key = format!("issue-14-keyed-{test_id}");
     let keyed_payload = fixture_payload(KEYED_FIXTURE, &test_id, "keyed-publish");
     let keyed_session = start_session(
         &adapter,
@@ -169,7 +169,7 @@ fn latest_consumer_session_ignores_pre_session_records_and_emits_post_session_re
     let events = RecordingBoundaryEventEmitter::default();
     let test_id = unique_id();
 
-    let before_key = format!("issue-16-before-{test_id}");
+    let before_key = format!("issue-14-before-{test_id}");
     let before_payload = consumer_payload(&test_id, "before-start");
     publish_to_topic(
         &adapter,
@@ -188,7 +188,7 @@ fn latest_consumer_session_ignores_pre_session_records_and_emits_post_session_re
         false,
     );
 
-    let after_key = format!("issue-16-after-{test_id}");
+    let after_key = format!("issue-14-after-{test_id}");
     let after_payload = consumer_payload(&test_id, "after-start");
     let record = publish_until_observed_by_key(
         &adapter,
@@ -229,7 +229,7 @@ fn stop_reports_lifecycle_event_and_cleanup_result() {
     let adapter = NativeKafkaAdapter::default();
     let events = RecordingBoundaryEventEmitter::default();
     let test_id = unique_id();
-    let key = format!("issue-16-cleanup-{test_id}");
+    let key = format!("issue-14-cleanup-{test_id}");
     let payload = consumer_payload(&test_id, "cleanup");
 
     let session = start_session(
@@ -298,10 +298,10 @@ fn cli_produced_record_is_visible_to_milena_consumer() {
 
     let adapter = NativeKafkaAdapter::default();
     let events = RecordingBoundaryEventEmitter::default();
-    let interop_key = env_or("MILENA_KAFKA_CLI_INTEROP_KEY", "issue16-cli-seed");
+    let interop_key = env_or("MILENA_KAFKA_CLI_INTEROP_KEY", "issue14-cli-seed");
     let interop_payload = env_or(
         "MILENA_KAFKA_CLI_INTEROP_PAYLOAD",
-        r#"{"fixture":"issue16-cli-interop","source":"kafka-cli"}"#,
+        r#"{"fixture":"issue14-cli-interop","source":"kafka-cli"}"#,
     );
 
     let session = start_session(
@@ -402,7 +402,7 @@ fn failure_scenarios_surface_command_errors_without_hanging() {
         MilenaCommandErrorCode::TopicRequired,
     );
 
-    let missing_topic = format!("milena.issue16.missing.{}", unique_id());
+    let missing_topic = format!("milena.issue14.missing.{}", unique_id());
     assert_error_code(
         publish_to_topic(
             &adapter,
@@ -452,7 +452,7 @@ impl IntegrationSettings {
         properties.insert("sasl.password".to_string(), password.clone());
         properties.insert(
             "client.id".to_string(),
-            format!("milena-issue16-{}", unique_id()),
+            format!("milena-issue14-{}", unique_id()),
         );
         properties.insert(
             "request.timeout.ms".to_string(),
@@ -480,7 +480,7 @@ impl IntegrationSettings {
 
         Some(Self {
             auth: RuntimeAuthConfig {
-                environment: env_or("MILENA_KAFKA_ENVIRONMENT", "local-issue16"),
+                environment: env_or("MILENA_KAFKA_ENVIRONMENT", "local-issue14"),
                 brokers,
                 properties,
             },
@@ -810,7 +810,7 @@ fn assert_valid_json(payload: &str) {
 fn fixture_payload(fixture: &str, test_id: &str, phase: &str) -> String {
     let mut value = serde_json::from_str::<serde_json::Value>(fixture)
         .expect("fixture payload should be valid JSON");
-    value["issue16"] = json!({
+    value["issue14"] = json!({
         "phase": phase,
         "testId": test_id
     });
@@ -819,7 +819,7 @@ fn fixture_payload(fixture: &str, test_id: &str, phase: &str) -> String {
 
 fn consumer_payload(test_id: &str, phase: &str) -> String {
     json!({
-        "fixture": "issue-16-consumer-record",
+        "fixture": "issue-14-consumer-record",
         "phase": phase,
         "testId": test_id
     })

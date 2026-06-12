@@ -150,7 +150,7 @@ keyed record through Kafka CLI before running Rust tests. The Rust harness then
 consumes that record through `NativeKafkaAdapter` and the public command
 boundary to prove cross-client visibility.
 
-Expected coverage for issue #16:
+Expected coverage for issue #14:
 
 - Topic listing returns deterministic fixture topics, filters internal topics,
   and reports usable partition metadata.
@@ -166,6 +166,38 @@ Expected coverage for issue #16:
   errors without hanging.
 - CLI-produced records are visible to Milena through the native adapter and
   command boundary when the tests are run through `npm run kafka:test`.
+
+## Approved E2E Scenarios
+
+The checked-in scenarios under `scenarios/e2e/*.approved.md` use the
+[Approved Scenarios](https://lexler.github.io/augmented-coding-patterns/patterns/approved-scenarios/)
+pattern: each Markdown file combines input data, expected output, and validation
+rules in a format that is easy to review by diff.
+
+Use the scenario runner for agent-friendly validation:
+
+```sh
+npm run e2e:scenarios -- list
+npm run e2e:scenarios -- show kafka-all
+npm run e2e:scenarios -- run kafka-all
+```
+
+The runner executes the commands declared in the approved scenario metadata,
+checks stable output markers, and writes actual run reports under
+`.tmp/e2e-scenarios/*.actual.md`. Review the generated actual file after each
+run and keep it out of git.
+
+Recommended agent workflow:
+
+1. Run `npm run e2e:scenarios -- list` and choose the narrowest scenario that
+   covers the change.
+2. Run `npm run e2e:scenarios -- show <scenario-id>` before execution and read
+   the input data, expected output, and validation rules.
+3. Run `npm run e2e:scenarios -- run <scenario-id>`.
+4. If the command fails, use the generated `.actual.md` file as the first debug
+   artifact.
+5. If the command passes, scan the `.actual.md` marker checks and summarize the
+   scenario ID plus pass/fail result in the issue or PR.
 
 ## Manual Milena Checks
 

@@ -15,8 +15,8 @@ export MILENA_KAFKA_USERNAME="$KAFKA_USERNAME"
 export MILENA_KAFKA_PASSWORD="$KAFKA_PASSWORD"
 export MILENA_KAFKA_SSL_CA_LOCATION="${MILENA_KAFKA_SSL_CA_LOCATION:-$ROOT_DIR/docker/kafka/generated/ssl/ca.crt}"
 export MILENA_KAFKA_CLI_INTEROP_TOPIC="${MILENA_KAFKA_CLI_INTEROP_TOPIC:-milena.issue14.interop}"
-export MILENA_KAFKA_CLI_INTEROP_KEY="${MILENA_KAFKA_CLI_INTEROP_KEY:-issue16-cli-seed-$KAFKA_SASL_MECHANISM}"
-export MILENA_KAFKA_CLI_INTEROP_PAYLOAD="${MILENA_KAFKA_CLI_INTEROP_PAYLOAD:-{\"fixture\":\"issue16-cli-interop\",\"source\":\"kafka-cli\",\"mechanism\":\"$KAFKA_SASL_MECHANISM\"}}"
+export MILENA_KAFKA_CLI_INTEROP_KEY="${MILENA_KAFKA_CLI_INTEROP_KEY:-issue14-cli-seed-$KAFKA_SASL_MECHANISM}"
+export MILENA_KAFKA_CLI_INTEROP_PAYLOAD="${MILENA_KAFKA_CLI_INTEROP_PAYLOAD:-{\"fixture\":\"issue14-cli-interop\",\"source\":\"kafka-cli\",\"mechanism\":\"$KAFKA_SASL_MECHANISM\"}}"
 export MILENA_KAFKA_CLI_INTEROP_SEEDED=1
 
 if [[ ! -f "$ROOT_DIR/src-tauri/tests/kafka_integration.rs" ]]; then
