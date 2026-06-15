@@ -1479,7 +1479,6 @@ export function WorkspaceShell({
               <small>{activeRuntimeAuth.environment}</small>
             </div>
             <div className="rail-header-actions">
-              <span className="status-pill">local</span>
               <button
                 className="rail-toggle-button"
                 type="button"

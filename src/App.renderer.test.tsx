@@ -49,6 +49,7 @@ describe("App renderer flow harness", () => {
     const topicsRail = screen.getByLabelText("Kafka topics");
     expect(within(topicsRail).getByText("Milena - Kafka Reader")).toBeVisible();
     expect(within(topicsRail).getByText("local-dev")).toBeVisible();
+    expect(within(topicsRail).queryByText("local")).not.toBeInTheDocument();
     expect(within(topicsRail).queryByText("macos-dev")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Activity log")).toHaveTextContent("no panes");
