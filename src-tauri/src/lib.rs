@@ -8,7 +8,7 @@ pub mod kafka_adapter;
 
 use contracts::{
     AppState, CommandResult, DeleteEnvironmentResponse, KafkaConsumerSession, KafkaTopicList,
-    ListKafkaTopicsRequest, ListSavedEnvironmentsResponse, MilenaBoundaryEvent,
+    ListKafkaTopicsRequest, ListSavedEnvironmentsResponse, MilenaBoundaryEvent, MilenaCommandError,
     PublishKafkaRecordRequest, PublishKafkaRecordResponse, RuntimeAuthConfig,
     SaveEnvironmentRequest, SavedEnvironment, StartKafkaConsumerSessionRequest,
     StopKafkaConsumerSessionRequest, StopKafkaConsumerSessionResponse, TopicSessionPreview,
@@ -105,36 +105,61 @@ fn materialize_temporary_runtime_auth_config(
 }
 
 #[tauri::command]
-fn list_kafka_topics(
+async fn list_kafka_topics(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: ListKafkaTopicsRequest,
 ) -> CommandResult<KafkaTopicList> {
-    command_boundary::list_kafka_topics(request, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || command_boundary::list_kafka_topics(request, &kafka)).await
 }
 
 #[tauri::command]
-fn publish_kafka_record(
+async fn publish_kafka_record(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: PublishKafkaRecordRequest,
 ) -> CommandResult<PublishKafkaRecordResponse> {
-    command_boundary::publish_kafka_record(request, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || command_boundary::publish_kafka_record(request, &kafka))
+        .await
 }
 
 #[tauri::command]
-fn start_kafka_consumer_session(
+async fn start_kafka_consumer_session(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: StartKafkaConsumerSessionRequest,
     on_event: Channel<MilenaBoundaryEvent>,
 ) -> CommandResult<KafkaConsumerSession> {
-    command_boundary::start_kafka_consumer_session(request, on_event, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || {
+        command_boundary::start_kafka_consumer_session(request, on_event, &kafka)
+    })
+    .await
 }
 
 #[tauri::command]
-fn stop_kafka_consumer_session(
+async fn stop_kafka_consumer_session(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: StopKafkaConsumerSessionRequest,
 ) -> CommandResult<StopKafkaConsumerSessionResponse> {
-    command_boundary::stop_kafka_consumer_session(request, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || {
+        command_boundary::stop_kafka_consumer_session(request, &kafka)
+    })
+    .await
+}
+
+async fn run_blocking_kafka_command<T, F>(command: F) -> CommandResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CommandResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(command)
+        .await
+        .map_err(|error| {
+            MilenaCommandError::kafka_operation_failed(format!(
+                "Kafka command worker failed: {error}"
+            ))
+        })?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

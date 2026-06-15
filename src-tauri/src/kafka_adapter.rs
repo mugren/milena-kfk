@@ -54,7 +54,7 @@ pub trait KafkaAdapter {
     ) -> CommandResult<StopKafkaConsumerSessionResponse>;
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct NativeKafkaAdapter {
     sessions: Arc<Mutex<BTreeMap<String, NativeConsumerSession>>>,
 }
