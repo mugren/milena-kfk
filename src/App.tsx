@@ -45,6 +45,7 @@ import {
   stopKafkaConsumerSession,
   type MilenaCommandError,
   type MilenaBoundaryEvent,
+  type KafkaTopicMetadata,
   type SavedEnvironment,
 } from "./lib/tauri";
 import {
@@ -150,6 +151,11 @@ type VisibleColumns = {
   inspector: boolean;
 };
 
+type TestedTopicList = {
+  environmentSignature: string;
+  topics: KafkaTopicMetadata[];
+};
+
 const APP_SHELL_NAME = "Milena - Kafka Reader";
 const LAST_SELECTED_ENVIRONMENT_KEY = "milena.lastSelectedEnvironment.v1";
 
@@ -169,6 +175,11 @@ const localDevRuntimeAuth: RuntimeAuthConfig = {
 function App() {
   const [activeRuntimeAuth, setActiveRuntimeAuth] =
     useState<RuntimeAuthConfig | null>(null);
+  const [initialWorkspaceTopics, setInitialWorkspaceTopics] =
+    useState<KafkaTopicMetadata[] | null>(null);
+  const [testedTopicList, setTestedTopicList] = useState<TestedTopicList | null>(
+    null,
+  );
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [chooserStatus, setChooserStatus] = useState<ChooserStatus>({
     tone: "loading",
@@ -329,6 +340,10 @@ function App() {
     try {
       const auth = await materializeRuntimeAuthConfig(selectedEnvironment.name);
       const topicList = await listKafkaTopics({ auth });
+      setTestedTopicList({
+        environmentSignature: onboardingEnvironmentSignature(selectedEnvironment),
+        topics: topicList.topics,
+      });
       setChooserStatus({
         tone: "success",
         message: connectionSuccessMessage(topicList.topics.length),
@@ -352,9 +367,16 @@ function App() {
     try {
       const auth = await materializeRuntimeAuthConfig(selectedEnvironment.name);
       rememberLastSelectedEnvironment(selectedEnvironment.name);
+      const testedTopics =
+        testedTopicList?.environmentSignature ===
+        onboardingEnvironmentSignature(selectedEnvironment)
+          ? testedTopicList.topics
+          : null;
+      setInitialWorkspaceTopics(testedTopics);
       setActiveRuntimeAuth(auth);
     } catch (cause) {
       const message = errorMessage(cause, "Environment open failed");
+      setInitialWorkspaceTopics(null);
       setChooserStatus({ tone: "error", message });
     }
   }
@@ -368,6 +390,7 @@ function App() {
       }
       return next;
     });
+    setInitialWorkspaceTopics(null);
     setChooserStatus({ tone: "idle", message: `${environmentName} selected` });
   }
 
@@ -416,6 +439,10 @@ function App() {
       });
       const topicList = await listKafkaTopics({ auth });
       const message = `Test passed: ${pluralizeTopics(topicList.topics.length)}`;
+      setTestedTopicList({
+        environmentSignature: onboardingEnvironmentSignature(environment),
+        topics: topicList.topics,
+      });
       setOnboarding((current) => {
         if (!current?.form || onboardingFormSignature(current.form) !== testSignature) {
           return current;
@@ -511,7 +538,8 @@ function App() {
     return (
       <WorkspaceShell
         activeRuntimeAuth={activeRuntimeAuth}
-        autoLoadTopics
+        autoLoadTopics={initialWorkspaceTopics === null}
+        initialTopics={initialWorkspaceTopics}
         onChangeEnvironment={changeEnvironment}
       />
     );
@@ -1047,16 +1075,24 @@ function FieldError({
 export function WorkspaceShell({
   activeRuntimeAuth = localDevRuntimeAuth,
   autoLoadTopics = false,
+  initialTopics = null,
   onChangeEnvironment,
 }: {
   activeRuntimeAuth?: RuntimeAuthConfig;
   autoLoadTopics?: boolean;
+  initialTopics?: KafkaTopicMetadata[] | null;
   onChangeEnvironment?: (environmentName: string) => void;
 }) {
   const [appState, setAppState] = useState<AppState | null>(null);
   const [workspace, setWorkspace] = useState(createInitialWorkspaceState);
   const [topicRail, setTopicRail] = useState(() =>
-    createInitialTopicRailState(getTopicPinStore()),
+    initialTopics === null
+      ? createInitialTopicRailState(getTopicPinStore())
+      : markTopicLoadSucceeded(
+          createInitialTopicRailState(getTopicPinStore()),
+          environmentKey(activeRuntimeAuth),
+          initialTopics,
+        ),
   );
   const [messageRenderPreferences, setMessageRenderPreferences] = useState(() =>
     readMessageRenderPreferences(getMessageRenderPreferenceStore()),
@@ -2389,6 +2425,16 @@ function toOnboardingEnvironment(
     username: environment.username ?? "",
     advancedPropertiesText: environment.advancedProperties,
   };
+}
+
+function onboardingEnvironmentSignature(environment: OnboardingEnvironment): string {
+  return JSON.stringify({
+    name: environment.name,
+    brokers: environment.brokers,
+    authMode: environment.authMode,
+    username: environment.username,
+    advancedPropertiesText: environment.advancedPropertiesText,
+  });
 }
 
 function connectionSuccessMessage(topicCount: number): string {

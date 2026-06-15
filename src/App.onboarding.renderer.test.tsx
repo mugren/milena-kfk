@@ -524,6 +524,25 @@ describe("App onboarding renderer flow", () => {
     expect(tauri.materializeRuntimeAuthConfig).toHaveBeenCalledTimes(2);
   });
 
+  it("opens a tested saved environment without repeating the topic metadata fetch", async () => {
+    const { user } = renderAppChooser();
+
+    await screen.findByLabelText("Environment chooser");
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+
+    await waitFor(() => expect(tauri.listKafkaTopics).toHaveBeenCalledOnce());
+    expect(await screen.findByText("Connection OK: 5 topics")).toBeVisible();
+
+    tauri.listKafkaTopics.mockRejectedValueOnce(new Error("metadata timeout"));
+    await user.click(screen.getByRole("button", { name: "Open" }));
+
+    expect(await screen.findByLabelText("Milena workspace")).toBeVisible();
+    expect(topicSelect("orders.created")).toBeVisible();
+    expect(tauri.materializeRuntimeAuthConfig).toHaveBeenCalledTimes(2);
+    expect(tauri.listKafkaTopics).toHaveBeenCalledOnce();
+    expect(screen.queryByText("metadata timeout")).not.toBeInTheDocument();
+  });
+
   it("tests current add form values through temporary runtime auth without saving", async () => {
     const { user } = renderAppChooser();
 

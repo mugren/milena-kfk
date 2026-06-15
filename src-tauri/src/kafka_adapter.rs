@@ -29,7 +29,7 @@ use crate::{
 };
 
 const GROUP_ID_PREFIX: &str = "milena-poll";
-const METADATA_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
+const METADATA_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub trait KafkaAdapter {
