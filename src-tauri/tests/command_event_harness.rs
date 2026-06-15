@@ -2,10 +2,10 @@ use std::cell::RefCell;
 
 use milena_lib::command_boundary::{app_state, preview_topic_session, BoundaryEventEmitter};
 use milena_lib::contracts::{
-    ImportKafkaShellEnvironmentResponse, KafkaConsumerGroupCleanupAttempt, KafkaConsumerSession,
-    KafkaRecordEvent, KafkaTopicList, KafkaTopicMetadata, ListKafkaTopicsRequest,
-    MilenaBoundaryEvent, MilenaCapability, MilenaCommandError, MilenaCommandErrorCode,
-    PublishKafkaRecordRequest, PublishKafkaRecordResponse, RuntimeAuthConfig, SavedEnvironment,
+    EnvironmentAuthMode, KafkaConsumerGroupCleanupAttempt, KafkaConsumerSession, KafkaRecordEvent,
+    KafkaTopicList, KafkaTopicMetadata, ListKafkaTopicsRequest, MilenaBoundaryEvent,
+    MilenaCapability, MilenaCommandError, MilenaCommandErrorCode, PublishKafkaRecordRequest,
+    PublishKafkaRecordResponse, RuntimeAuthConfig, SavedEnvironment,
     StartKafkaConsumerSessionRequest, StopKafkaConsumerSessionRequest,
     StopKafkaConsumerSessionResponse, TopicSessionMode, TopicSessionPreview,
     TopicSessionPreviewRequest,
@@ -451,35 +451,32 @@ fn kafka_event_contracts_round_trip_as_frontend_discriminated_unions() {
 }
 
 #[test]
-fn environment_import_response_contract_does_not_include_plaintext_password() {
-    let response = ImportKafkaShellEnvironmentResponse {
-        environment: SavedEnvironment {
-            name: "dev".to_string(),
-            brokers: vec!["localhost:9092".to_string()],
-            username: "alice".to_string(),
-            auth_properties_template: "security.protocol=SASL_SSL".to_string(),
-            password_secret_ref: "macos-keychain://milena.kafka.environment/646576/password"
-                .to_string(),
-        },
+fn saved_environment_contract_includes_structured_metadata_without_secret_references() {
+    let environment = SavedEnvironment {
+        schema_version: 1,
+        name: "dev".to_string(),
+        brokers: vec!["localhost:9092".to_string()],
+        auth_mode: EnvironmentAuthMode::SaslSslScramSha512,
+        username: Some("alice".to_string()),
+        advanced_properties: "client.id=milena-dev".to_string(),
     };
 
-    let value = serde_json::to_value(&response).expect("import response should serialize");
+    let value = serde_json::to_value(&environment).expect("environment should serialize");
     assert_eq!(
         value,
         json!({
-            "environment": {
-                "name": "dev",
-                "brokers": ["localhost:9092"],
-                "username": "alice",
-                "authPropertiesTemplate": "security.protocol=SASL_SSL",
-                "passwordSecretRef": "macos-keychain://milena.kafka.environment/646576/password",
-            },
+            "schemaVersion": 1,
+            "name": "dev",
+            "brokers": ["localhost:9092"],
+            "authMode": "saslSslScramSha512",
+            "username": "alice",
+            "advancedProperties": "client.id=milena-dev",
         })
     );
-    assert!(!value.to_string().contains("password\":\""));
+    assert!(!value.to_string().contains("password"));
+    assert!(!value.to_string().contains("secret"));
     assert_eq!(
-        serde_json::from_value::<ImportKafkaShellEnvironmentResponse>(value)
-            .expect("import response should deserialize"),
-        response
+        serde_json::from_value::<SavedEnvironment>(value).expect("environment should deserialize"),
+        environment
     );
 }

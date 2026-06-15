@@ -162,6 +162,18 @@ export function toggleTopicPin(
   };
 }
 
+export function removePinnedTopicsForEnvironment(
+  environment: string,
+  store?: TopicPinStore,
+): Record<string, string[]> {
+  const pinnedTopicsByEnvironment = readPinnedTopics(store);
+  const { [environment]: _deletedEnvironment, ...nextPinnedTopicsByEnvironment } =
+    pinnedTopicsByEnvironment;
+
+  writePinnedTopics(nextPinnedTopicsByEnvironment, store);
+  return nextPinnedTopicsByEnvironment;
+}
+
 export function togglePinnedTopicForEnvironment(
   pinnedTopicsByEnvironment: Record<string, string[]>,
   environment: string,

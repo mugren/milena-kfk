@@ -246,9 +246,24 @@ pub fn build_native_client_config(
     }
 
     let security_protocol = required_property(auth, "security.protocol")?;
+    if security_protocol.eq_ignore_ascii_case("PLAINTEXT") {
+        let mut entries = auth.properties.clone();
+        entries.insert("bootstrap.servers".to_string(), brokers.join(","));
+        entries.insert("security.protocol".to_string(), "PLAINTEXT".to_string());
+        entries.remove("sasl.mechanism");
+        entries.remove("sasl.username");
+        entries.remove("sasl.password");
+        entries.remove("sasl.jaas.config");
+        if let Some(group_id) = group_id {
+            entries.insert("group.id".to_string(), group_id.to_string());
+        }
+
+        return Ok(NativeClientConfig { entries });
+    }
+
     if !security_protocol.eq_ignore_ascii_case("SASL_SSL") {
         return Err(MilenaCommandError::kafka_auth_unsupported(format!(
-            "unsupported Kafka security.protocol '{security_protocol}'; MVP supports SASL_SSL"
+            "unsupported Kafka security.protocol '{security_protocol}'; MVP supports PLAINTEXT and SASL_SSL"
         )));
     }
 

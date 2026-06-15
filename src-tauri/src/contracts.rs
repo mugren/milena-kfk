@@ -52,33 +52,41 @@ pub struct TopicSessionPreview {
 pub struct SaveEnvironmentRequest {
     pub name: String,
     pub brokers: Vec<String>,
-    pub username: String,
-    pub password: String,
-    pub auth_properties_template: String,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportKafkaShellEnvironmentRequest {
-    pub environment_name: String,
-    pub environment_file_path: String,
-    pub auth_properties_path: String,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportKafkaShellEnvironmentResponse {
-    pub environment: SavedEnvironment,
+    pub auth_mode: EnvironmentAuthMode,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub advanced_properties: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedEnvironment {
+    pub schema_version: u16,
     pub name: String,
     pub brokers: Vec<String>,
-    pub username: String,
-    pub auth_properties_template: String,
-    pub password_secret_ref: String,
+    pub auth_mode: EnvironmentAuthMode,
+    pub username: Option<String>,
+    pub advanced_properties: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSavedEnvironmentsResponse {
+    pub environments: Vec<SavedEnvironment>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteEnvironmentResponse {
+    pub name: String,
+    pub warning: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvironmentAuthMode {
+    Plaintext,
+    SaslSslScramSha512,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -266,10 +274,13 @@ impl MilenaCommandError {
         }
     }
 
-    pub fn environment_auth_template_required() -> Self {
+    pub fn environment_duplicate_name(name: impl ToString) -> Self {
         Self {
-            code: MilenaCommandErrorCode::EnvironmentAuthTemplateRequired,
-            message: "auth.properties template is required".to_string(),
+            code: MilenaCommandErrorCode::EnvironmentDuplicateName,
+            message: format!(
+                "environment name '{}' conflicts with an existing environment",
+                name.to_string()
+            ),
         }
     }
 
@@ -301,16 +312,9 @@ impl MilenaCommandError {
         }
     }
 
-    pub fn environment_auth_template_invalid(cause: impl ToString) -> Self {
+    pub fn environment_advanced_properties_invalid(cause: impl ToString) -> Self {
         Self {
-            code: MilenaCommandErrorCode::EnvironmentAuthTemplateInvalid,
-            message: cause.to_string(),
-        }
-    }
-
-    pub fn environment_import_invalid(cause: impl ToString) -> Self {
-        Self {
-            code: MilenaCommandErrorCode::EnvironmentImportInvalid,
+            code: MilenaCommandErrorCode::EnvironmentAdvancedPropertiesInvalid,
             message: cause.to_string(),
         }
     }
@@ -356,13 +360,12 @@ pub enum MilenaCommandErrorCode {
     EnvironmentBrokersRequired,
     EnvironmentUsernameRequired,
     EnvironmentPasswordRequired,
-    EnvironmentAuthTemplateRequired,
+    EnvironmentDuplicateName,
     EnvironmentNotFound,
     EnvironmentStorageFailed,
     EnvironmentSecretStoreFailed,
     EnvironmentSecretMissing,
-    EnvironmentAuthTemplateInvalid,
-    EnvironmentImportInvalid,
+    EnvironmentAdvancedPropertiesInvalid,
     KafkaAuthUnsupported,
     KafkaOperationFailed,
     KafkaSessionNotFound,

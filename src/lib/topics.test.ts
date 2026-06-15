@@ -4,6 +4,7 @@ import {
   filterAndOrderTopics,
   loadTopicsForEnvironment,
   pinsForEnvironment,
+  removePinnedTopicsForEnvironment,
   setTopicSearch,
   toggleTopicPin,
   visibleTopicRows,
@@ -210,6 +211,24 @@ describe("topic rail state", () => {
     expect(unpinned.pinnedTopicsByEnvironment.local).toEqual([]);
     expect(restored.pinnedTopicsByEnvironment.local).toEqual([]);
     expect(store.getItem(pinStorageKey)).toBe("{\"local\":[]}");
+  });
+
+  it("removes stored pinned topics for a deleted environment", () => {
+    const store = memoryStore({
+      [pinStorageKey]: JSON.stringify({
+        local: ["orders.created"],
+        staging: ["payments.authorized"],
+      }),
+    });
+
+    const remaining = removePinnedTopicsForEnvironment("local", store);
+
+    expect(remaining).toEqual({
+      staging: ["payments.authorized"],
+    });
+    expect(store.getItem(pinStorageKey)).toBe(
+      "{\"staging\":[\"payments.authorized\"]}",
+    );
   });
 
   it("recovers from malformed pin storage", () => {

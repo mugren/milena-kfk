@@ -3,6 +3,7 @@ import {
   MESSAGE_RENDER_PREFERENCES_KEY,
   readMessageRenderPreferences,
   renderKafkaRecord,
+  removeMessageRenderPreferencesForEnvironment,
   setTopicMessageRenderMode,
   stampKafkaRecordReceivedAt,
   topicMessageRenderMode,
@@ -69,6 +70,33 @@ describe("message rendering", () => {
     );
     expect(store.getItem(MESSAGE_RENDER_PREFERENCES_KEY)).toContain(
       "orders.created",
+    );
+  });
+
+  it("removes stored render preferences for a deleted environment", () => {
+    const store = memoryStore({
+      [MESSAGE_RENDER_PREFERENCES_KEY]: JSON.stringify({
+        local: {
+          "orders.created": "raw",
+        },
+        staging: {
+          "payments.authorized": "json",
+        },
+      }),
+    });
+
+    const remaining = removeMessageRenderPreferencesForEnvironment(
+      "local",
+      store,
+    );
+
+    expect(remaining).toEqual({
+      staging: {
+        "payments.authorized": "json",
+      },
+    });
+    expect(store.getItem(MESSAGE_RENDER_PREFERENCES_KEY)).toBe(
+      "{\"staging\":{\"payments.authorized\":\"json\"}}",
     );
   });
 

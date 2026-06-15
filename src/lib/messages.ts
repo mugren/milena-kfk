@@ -202,6 +202,17 @@ export function setTopicMessageRenderMode(
   return nextPreferences;
 }
 
+export function removeMessageRenderPreferencesForEnvironment(
+  environment: string,
+  store?: MessageRenderPreferenceStore,
+): MessageRenderPreferences {
+  const preferences = readMessageRenderPreferences(store);
+  const { [environment]: _deletedEnvironment, ...nextPreferences } = preferences;
+
+  writeMessageRenderPreferences(nextPreferences, store);
+  return nextPreferences;
+}
+
 export function topicMessageRenderMode(
   preferences: MessageRenderPreferences,
   environment: string,
