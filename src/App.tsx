@@ -2221,7 +2221,7 @@ function MessageStreamRow({
             <span className="message-marker">{message.payload.marker}</span>
           ) : null}
           <code>{message.payload.preview}</code>
-          {message.payload.truncated ? (
+          {message.payload.previewTruncated ? (
             <span className="message-marker">truncated</span>
           ) : null}
         </span>
@@ -2230,7 +2230,7 @@ function MessageStreamRow({
       {message.expanded ? (
         <div className="message-expanded">
           <pre>{message.payload.content}</pre>
-          {message.payload.truncated ? (
+          {message.payload.contentTruncated ? (
             <span className="message-marker">payload truncated</span>
           ) : null}
           <section className="message-headers" aria-label="Kafka headers">

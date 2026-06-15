@@ -919,6 +919,35 @@ describe("App renderer flow harness", () => {
     expect(appCss).toMatch(/\.message-preview code\s*{[^}]*min-width:\s*0;[^}]*flex:\s*1 1 auto;/s);
   });
 
+  it("does not label expanded records as truncated when only the summary preview is shortened", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-1");
+
+    emit("session-1", kafkaRecord("session-1", {
+      offset: 40,
+      payload: JSON.stringify({
+        mgId: "GAMEPLAN",
+        instanceId: 30013,
+        strategyName: "manual_mid_yes_no",
+        requestId: 1781305950813,
+        status: "config_applied",
+        config:
+          "{\"mojoId\":\"KXBTCD-26JUN1517-T66499.99\",\"qty_yes\":10,\"qty_no\":15,\"mid\":25,\"vig\":1,\"widen_to_market\":false,\"max_vig\":1,\"limits\":{\"max_loss\":1000}}",
+      }),
+    }));
+
+    const row = messageRowButton("GAMEPLAN");
+    expect(within(row).getByText("truncated")).toBeVisible();
+
+    await user.click(row);
+
+    expect(screen.getByText(/qty_yes/)).toBeVisible();
+    expect(screen.queryByText("payload truncated")).not.toBeInTheDocument();
+  });
+
   it("opens and closes the topic open menu and routes actions to panes", async () => {
     const { user } = renderApp();
     await loadedTopics();

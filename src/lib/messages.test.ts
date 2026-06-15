@@ -182,6 +182,24 @@ describe("message rendering", () => {
     expect(rendered.payload.truncated).toBe(true);
   });
 
+  it("tracks preview truncation separately from expanded payload truncation", () => {
+    const rendered = renderKafkaRecord(
+      record({
+        payload: JSON.stringify({
+          mgId: "GAMEPLAN",
+          instanceId: 30013,
+          strategyName: "manual_mid_yes_no",
+          status: "config_applied",
+        }),
+      }),
+      { maxPreviewChars: 32, maxExpandedChars: 800 },
+    );
+
+    expect(rendered.payload.previewTruncated).toBe(true);
+    expect(rendered.payload.contentTruncated).toBe(false);
+    expect(rendered.payload.truncated).toBe(true);
+  });
+
   it("stamps receive time on Kafka record events", () => {
     const event: MilenaBoundaryEvent = {
       event: "kafkaRecord",
