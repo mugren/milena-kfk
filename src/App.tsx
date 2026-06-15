@@ -100,6 +100,7 @@ import {
 } from "./lib/topics";
 import {
   canStartPaneSession,
+  clearPaneActivity,
   createInitialWorkspaceState,
   expandPane as expandWorkspacePaneState,
   getSelectedPane,
@@ -1332,6 +1333,10 @@ export function WorkspaceShell({
     });
   }
 
+  function clearPaneMessages(paneId: number) {
+    updateWorkspace((current) => clearPaneActivity(current, paneId));
+  }
+
   function closeWorkspacePane(paneId: number) {
     nextPollingRun(paneId);
     void closePanePollingSession({
@@ -1685,6 +1690,7 @@ export function WorkspaceShell({
               onExpand={() => expandPane(pane.id)}
               onRestore={restorePane}
               onStop={() => stopPane(pane.id)}
+              onClearMessages={() => clearPaneMessages(pane.id)}
               onClose={() => closeWorkspacePane(pane.id)}
             />
           ))}
@@ -1867,6 +1873,7 @@ type PaneProps = {
   onExpand: () => void;
   onRestore: () => void;
   onStop: () => void;
+  onClearMessages: () => void;
   onClose: () => void;
 };
 
@@ -1889,6 +1896,7 @@ export function Pane({
   onExpand,
   onRestore,
   onStop,
+  onClearMessages,
   onClose,
 }: PaneProps) {
   const empty = isPaneEmpty(pane);
@@ -1926,6 +1934,11 @@ export function Pane({
       }
       return next;
     });
+  }
+
+  function clearMessages() {
+    setExpandedRows(new Set());
+    onClearMessages();
   }
 
   return (
@@ -2067,6 +2080,17 @@ export function Pane({
                   </select>
                 </label>
               ) : null}
+              <button
+                className="secondary compact consumer-clear-button"
+                type="button"
+                aria-label={`Clear messages for pane ${pane.id}`}
+                title={`Clear messages for pane ${pane.id}`}
+                onClick={stopEvent(clearMessages)}
+                disabled={recordEvents.length === 0}
+              >
+                <Trash2 aria-hidden="true" size={13} strokeWidth={1.9} />
+                <span>Clear</span>
+              </button>
               <span className={`status-pill ${pane.status}`}>{compactStatus}</span>
             </div>
           </header>

@@ -426,6 +426,25 @@ describe("App renderer flow harness", () => {
       "orders.created p0 / 42",
     );
 
+    await user.click(
+      within(pane("1")).getByRole("button", {
+        name: "Clear messages for pane 1",
+      }),
+    );
+    expect(pane("1")).not.toHaveTextContent('{"offset":42}');
+    expect(pane("1")).toHaveTextContent("session-1");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("kafkaRecord");
+    expect(tauri.stopKafkaConsumerSession).not.toHaveBeenCalled();
+
+    emit(
+      "session-1",
+      kafkaRecord("session-1", {
+        offset: 43,
+        payload: "{\"offset\":43}",
+      }),
+    );
+    expect(await screen.findByText('{"offset":43}')).toBeVisible();
+
     await user.click(within(pane("1")).getByRole("button", { name: "Stop" }));
 
     await waitFor(() =>
@@ -1080,6 +1099,7 @@ function paneRenderProps({
     onExpand,
     onRestore,
     onStop,
+    onClearMessages: vi.fn(),
     onClose,
   };
 }
