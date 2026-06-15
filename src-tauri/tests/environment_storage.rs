@@ -142,6 +142,54 @@ fn scram_environment_materializes_generated_auth_properties_from_keychain_secret
 }
 
 #[test]
+fn sasl_ssl_plain_environment_materializes_for_local_compose_broker() {
+    let config_dir = temp_config_dir("sasl-plain-materialize");
+    let secrets = InMemoryEnvironmentSecretStore::default();
+
+    save_environment(
+        &config_dir,
+        SaveEnvironmentRequest {
+            name: "Local Compose".to_string(),
+            brokers: vec!["localhost:19092".to_string()],
+            auth_mode: EnvironmentAuthMode::SaslSslPlain,
+            username: Some("milena_plain".to_string()),
+            password: Some("milena-plain-secret".to_string()),
+            advanced_properties: "ssl.ca.location=docker/kafka/generated/ssl/ca.crt".to_string(),
+        },
+        &secrets,
+    )
+    .expect("SASL_SSL PLAIN environment should save");
+
+    let runtime = materialize_runtime_auth_config(&config_dir, "Local Compose", &secrets)
+        .expect("SASL_SSL PLAIN runtime auth should materialize");
+
+    assert_eq!(runtime.environment, "Local Compose");
+    assert_eq!(runtime.brokers, vec!["localhost:19092"]);
+    assert_eq!(
+        runtime.properties.get("security.protocol"),
+        Some(&"SASL_SSL".to_string())
+    );
+    assert_eq!(
+        runtime.properties.get("sasl.mechanism"),
+        Some(&"PLAIN".to_string())
+    );
+    assert_eq!(
+        runtime.properties.get("sasl.username"),
+        Some(&"milena_plain".to_string())
+    );
+    assert_eq!(
+        runtime.properties.get("sasl.password"),
+        Some(&"milena-plain-secret".to_string())
+    );
+    assert_eq!(
+        runtime.properties.get("ssl.ca.location"),
+        Some(&"docker/kafka/generated/ssl/ca.crt".to_string())
+    );
+
+    let _ = fs::remove_dir_all(config_dir);
+}
+
+#[test]
 fn scram_environment_edit_with_blank_password_reuses_existing_keychain_secret() {
     let config_dir = temp_config_dir("scram-edit-reuse-password");
     let secrets = InMemoryEnvironmentSecretStore::default();

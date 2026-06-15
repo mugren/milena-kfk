@@ -208,40 +208,43 @@ describe("onboarding state", () => {
   });
 
   it("validates auth-mode-specific fields before saving", () => {
-    const state = setOnboardingFormField(
-      setOnboardingFormField(
+    for (const authMode of ["saslSslPlain", "saslSslScramSha512"] as const) {
+      const state = setOnboardingFormField(
         setOnboardingFormField(
-          startAddEnvironment(createOnboardingState({ environments: [] })),
-          "name",
-          "Secure Dev",
+          setOnboardingFormField(
+            startAddEnvironment(createOnboardingState({ environments: [] })),
+            "name",
+            authMode === "saslSslPlain" ? "Local Compose" : "Secure Dev",
+          ),
+          "brokersText",
+          authMode === "saslSslPlain"
+            ? "localhost:19092"
+            : "secure.kafka.internal:9094",
         ),
-        "brokersText",
-        "secure.kafka.internal:9094",
-      ),
-      "authMode",
-      "saslSslScramSha512",
-    );
+        "authMode",
+        authMode,
+      );
 
-    const missingCredentials = saveOnboardingForm(state);
-    const rejected = expectFormRejected(missingCredentials);
+      const missingCredentials = saveOnboardingForm(state);
+      const rejected = expectFormRejected(missingCredentials);
 
-    expect(rejected.errors.username).toBe("Username is required");
-    expect(rejected.errors.password).toBe("Password is required");
+      expect(rejected.errors.username).toBe("Username is required");
+      expect(rejected.errors.password).toBe("Password is required");
 
-    const withCredentials = saveOnboardingForm(
-      setOnboardingFormField(
-        setOnboardingFormField(state, "username", "deploy"),
-        "password",
-        "secret",
-      ),
-    );
-    const saved = expectFormSaved(withCredentials);
+      const withCredentials = saveOnboardingForm(
+        setOnboardingFormField(
+          setOnboardingFormField(state, "username", "deploy"),
+          "password",
+          "secret",
+        ),
+      );
+      const saved = expectFormSaved(withCredentials);
 
-    expect(saved.environment).toMatchObject({
-      name: "Secure Dev",
-      authMode: "saslSslScramSha512",
-      username: "deploy",
-    });
+      expect(saved.environment).toMatchObject({
+        authMode,
+        username: "deploy",
+      });
+    }
   });
 
   it("allows an existing SCRAM environment to keep its password blank while editing", () => {

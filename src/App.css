@@ -410,6 +410,37 @@ button:disabled {
   gap: 8px;
 }
 
+.password-field {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: stretch;
+}
+
+.password-field input {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.password-field .password-preview-toggle {
+  min-width: 30px;
+  min-height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-color: var(--line);
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  background: var(--input);
+  color: var(--muted);
+}
+
+.password-field .password-preview-toggle:hover {
+  background: var(--panel-soft);
+  color: var(--ink);
+}
+
 .field {
   display: grid;
   gap: 3px;

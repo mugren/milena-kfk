@@ -61,6 +61,14 @@ fn native_config_maps_plaintext_auth_into_librdkafka_entries() {
     assert!(!native.entries().contains_key("sasl.username"));
     assert!(!native.entries().contains_key("sasl.password"));
     assert!(!native.entries().contains_key("sasl.jaas.config"));
+    assert_eq!(
+        native.entries().get("log.connection.close"),
+        Some(&"false".to_string())
+    );
+    assert_eq!(
+        native.entries().get("socket.timeout.ms"),
+        Some(&"3000".to_string())
+    );
 }
 
 #[test]
@@ -106,7 +114,42 @@ fn native_config_maps_plain_sasl_ssl_auth_into_librdkafka_entries() {
         native.entries().get("ssl.ca.location"),
         Some(&"/tmp/ca.pem".to_string())
     );
+    assert_eq!(
+        native.entries().get("socket.connection.setup.timeout.ms"),
+        Some(&"3000".to_string())
+    );
     assert!(!native.entries().contains_key("sasl.jaas.config"));
+}
+
+#[test]
+fn native_config_preserves_user_timeout_overrides_while_adding_low_noise_defaults() {
+    let mut runtime_auth = auth("PLAIN");
+    runtime_auth
+        .properties
+        .insert("request.timeout.ms".to_string(), "1000".to_string());
+    runtime_auth
+        .properties
+        .insert("socket.timeout.ms".to_string(), "1000".to_string());
+
+    let native = build_native_client_config(&runtime_auth, None)
+        .expect("auth should map with user timeouts");
+
+    assert_eq!(
+        native.entries().get("request.timeout.ms"),
+        Some(&"1000".to_string())
+    );
+    assert_eq!(
+        native.entries().get("socket.timeout.ms"),
+        Some(&"1000".to_string())
+    );
+    assert_eq!(
+        native.entries().get("log.connection.close"),
+        Some(&"false".to_string())
+    );
+    assert_eq!(
+        native.entries().get("reconnect.backoff.max.ms"),
+        Some(&"1000".to_string())
+    );
 }
 
 #[test]

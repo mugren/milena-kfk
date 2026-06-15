@@ -84,8 +84,8 @@ describe("App onboarding renderer flow", () => {
     const list = within(chooser).getByLabelText("Saved environments");
     const rows = await within(list).findAllByRole("button");
     expect(rows.map((row) => row.textContent)).toEqual([
-      "Local Devlocalhost:19092Plaintext",
-      "Stagingstaging.kafka.internal:9094deploySCRAM",
+      "Local Devlocalhost:19092PLAINTEXT",
+      "Stagingstaging.kafka.internal:9094deploySASL_SSL SCRAM",
     ]);
     expect(within(list).getByRole("button", { name: /Staging/ }))
       .toHaveAttribute("aria-current", "true");
@@ -123,6 +123,54 @@ describe("App onboarding renderer flow", () => {
     expect(screen.queryByLabelText("Milena workspace")).not.toBeInTheDocument();
     expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
     expect(tauri.publishKafkaRecord).not.toHaveBeenCalled();
+  });
+
+  it("saves local compose SASL_SSL PLAIN credentials", async () => {
+    tauri.listEnvironments.mockResolvedValueOnce({ environments: [] });
+    const { user } = renderAppChooser();
+
+    await screen.findByLabelText("Add environment");
+    await user.type(screen.getByLabelText("Environment name"), "local");
+    await user.type(screen.getByLabelText("Kafka brokers"), "localhost:19092");
+    await user.selectOptions(screen.getByLabelText("Auth mode"), "saslSslPlain");
+    await user.type(screen.getByLabelText("Kafka username"), "milena_plain");
+    await user.type(screen.getByLabelText("Kafka password"), "milena-plain-secret");
+    await user.type(
+      screen.getByLabelText("Advanced Kafka properties"),
+      "ssl.ca.location=docker/kafka/generated/ssl/ca.crt",
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(tauri.saveEnvironment).toHaveBeenCalledOnce());
+    expect(tauri.saveEnvironment).toHaveBeenCalledWith({
+      name: "local",
+      brokers: ["localhost:19092"],
+      authMode: "saslSslPlain",
+      username: "milena_plain",
+      password: "milena-plain-secret",
+      advancedProperties: "ssl.ca.location=docker/kafka/generated/ssl/ca.crt",
+    });
+    expect(await screen.findByText("Saved local")).toBeVisible();
+  });
+
+  it("shows structured save errors from Tauri commands", async () => {
+    tauri.listEnvironments.mockResolvedValueOnce({ environments: [] });
+    tauri.saveEnvironment.mockRejectedValueOnce({
+      code: "environment-secret-store-failed",
+      message: "Keychain is locked",
+    });
+    const { user } = renderAppChooser();
+
+    await screen.findByLabelText("Add environment");
+    await user.type(screen.getByLabelText("Environment name"), "local");
+    await user.type(screen.getByLabelText("Kafka brokers"), "localhost:19092");
+    await user.selectOptions(screen.getByLabelText("Auth mode"), "saslSslPlain");
+    await user.type(screen.getByLabelText("Kafka username"), "milena_plain");
+    await user.type(screen.getByLabelText("Kafka password"), "milena-plain-secret");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Keychain is locked")).toBeVisible();
+    expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
   });
 
   it("saves edited environments without opening a workspace", async () => {
@@ -519,6 +567,58 @@ describe("App onboarding renderer flow", () => {
 
     expect(screen.queryByText("Test passed: 5 topics")).not.toBeInTheDocument();
     expect(screen.queryByText("Connection OK: 5 topics")).not.toBeInTheDocument();
+  });
+
+  it("previews and hides the environment form password", async () => {
+    const { user } = renderAppChooser();
+
+    await screen.findByLabelText("Environment chooser");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.selectOptions(screen.getByLabelText("Auth mode"), "saslSslPlain");
+
+    const password = screen.getByLabelText("Kafka password");
+    await user.type(password, "milena-plain-secret");
+
+    expect(password).toHaveAttribute("type", "password");
+    await user.click(screen.getByRole("button", { name: "Show Kafka password" }));
+
+    expect(password).toHaveAttribute("type", "text");
+    expect(password).toHaveValue("milena-plain-secret");
+    await user.click(screen.getByRole("button", { name: "Hide Kafka password" }));
+
+    expect(password).toHaveAttribute("type", "password");
+    expect(password).toHaveValue("milena-plain-secret");
+  });
+
+  it("tests local compose through SASL_SSL PLAIN credentials", async () => {
+    const { user } = renderAppChooser();
+
+    await screen.findByLabelText("Environment chooser");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.type(screen.getByLabelText("Environment name"), "Local Compose");
+    await user.type(screen.getByLabelText("Kafka brokers"), "localhost:19092");
+    await user.selectOptions(screen.getByLabelText("Auth mode"), "saslSslPlain");
+    await user.type(screen.getByLabelText("Kafka username"), "milena_plain");
+    await user.type(screen.getByLabelText("Kafka password"), "milena-plain-secret");
+    await user.type(
+      screen.getByLabelText("Advanced Kafka properties"),
+      "ssl.ca.location=docker/kafka/generated/ssl/ca.crt",
+    );
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+
+    await waitFor(() =>
+      expect(tauri.materializeTemporaryRuntimeAuthConfig).toHaveBeenCalledOnce(),
+    );
+    expect(tauri.materializeTemporaryRuntimeAuthConfig).toHaveBeenCalledWith({
+      name: "Local Compose",
+      brokers: ["localhost:19092"],
+      authMode: "saslSslPlain",
+      username: "milena_plain",
+      password: "milena-plain-secret",
+      advancedProperties: "ssl.ca.location=docker/kafka/generated/ssl/ca.crt",
+    });
+    expect(tauri.listKafkaTopics).toHaveBeenCalledOnce();
+    expect(await screen.findByText("Test passed: 5 topics")).toBeVisible();
   });
 
   it("tests edit form values with a blank SCRAM password through the existing saved secret", async () => {

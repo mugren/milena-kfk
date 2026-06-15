@@ -155,18 +155,15 @@ pub fn save_environment(
 ) -> CommandResult<SavedEnvironment> {
     let metadata = validate_environment(config_dir, request)?;
 
-    match metadata.auth_mode {
-        EnvironmentAuthMode::Plaintext => {
-            let _ = secrets.remove_password(&keychain_account_for_environment(&metadata.name));
+    if environment_auth_mode_uses_secret(&metadata.auth_mode) {
+        let account = keychain_account_for_environment(&metadata.name);
+        if let Some(password) = metadata.password.as_deref() {
+            secrets.save_password(&account, password)?;
+        } else if secrets.load_password(&account)?.is_none() {
+            return Err(MilenaCommandError::environment_password_required());
         }
-        EnvironmentAuthMode::SaslSslScramSha512 => {
-            let account = keychain_account_for_environment(&metadata.name);
-            if let Some(password) = metadata.password.as_deref() {
-                secrets.save_password(&account, password)?;
-            } else if secrets.load_password(&account)?.is_none() {
-                return Err(MilenaCommandError::environment_password_required());
-            }
-        }
+    } else {
+        let _ = secrets.remove_password(&keychain_account_for_environment(&metadata.name));
     }
 
     write_metadata(config_dir, &metadata.without_password())?;
@@ -209,7 +206,7 @@ pub fn delete_environment(
     let path = environment_file_path(config_dir, &metadata.name);
     fs::remove_file(path).map_err(|error| MilenaCommandError::environment_storage_failed(error))?;
 
-    let warning = if metadata.auth_mode == EnvironmentAuthMode::SaslSslScramSha512 {
+    let warning = if environment_auth_mode_uses_secret(&metadata.auth_mode) {
         secrets
             .remove_password(&keychain_account_for_environment(&metadata.name))
             .err()
@@ -241,7 +238,7 @@ pub fn materialize_runtime_auth_config(
         EnvironmentAuthMode::Plaintext => {
             properties.insert("security.protocol".to_string(), "PLAINTEXT".to_string());
         }
-        EnvironmentAuthMode::SaslSslScramSha512 => {
+        EnvironmentAuthMode::SaslSslPlain | EnvironmentAuthMode::SaslSslScramSha512 => {
             let username = metadata
                 .username
                 .clone()
@@ -252,7 +249,10 @@ pub fn materialize_runtime_auth_config(
                 .ok_or_else(|| MilenaCommandError::environment_secret_missing(&account))?;
 
             properties.insert("security.protocol".to_string(), "SASL_SSL".to_string());
-            properties.insert("sasl.mechanism".to_string(), "SCRAM-SHA-512".to_string());
+            properties.insert(
+                "sasl.mechanism".to_string(),
+                sasl_mechanism_for_auth_mode(&metadata.auth_mode).to_string(),
+            );
             properties.insert("sasl.username".to_string(), username);
             properties.insert("sasl.password".to_string(), password);
         }
@@ -277,7 +277,7 @@ pub fn materialize_temporary_runtime_auth_config(
         EnvironmentAuthMode::Plaintext => {
             properties.insert("security.protocol".to_string(), "PLAINTEXT".to_string());
         }
-        EnvironmentAuthMode::SaslSslScramSha512 => {
+        EnvironmentAuthMode::SaslSslPlain | EnvironmentAuthMode::SaslSslScramSha512 => {
             let username = metadata
                 .username
                 .clone()
@@ -293,7 +293,10 @@ pub fn materialize_temporary_runtime_auth_config(
             };
 
             properties.insert("security.protocol".to_string(), "SASL_SSL".to_string());
-            properties.insert("sasl.mechanism".to_string(), "SCRAM-SHA-512".to_string());
+            properties.insert(
+                "sasl.mechanism".to_string(),
+                sasl_mechanism_for_auth_mode(&metadata.auth_mode).to_string(),
+            );
             properties.insert("sasl.username".to_string(), username);
             properties.insert("sasl.password".to_string(), password);
         }
@@ -331,7 +334,7 @@ fn validate_environment(
 
     let (username, password) = match request.auth_mode {
         EnvironmentAuthMode::Plaintext => (None, None),
-        EnvironmentAuthMode::SaslSslScramSha512 => {
+        EnvironmentAuthMode::SaslSslPlain | EnvironmentAuthMode::SaslSslScramSha512 => {
             let username = request
                 .username
                 .as_deref()
@@ -342,7 +345,7 @@ fn validate_environment(
                 .password
                 .as_deref()
                 .filter(|password| !password.trim().is_empty());
-            if password.is_none() && !existing_environment_uses_scram(config_dir, name)? {
+            if password.is_none() && !existing_environment_uses_secret(config_dir, name)? {
                 return Err(MilenaCommandError::environment_password_required());
             }
             (Some(username.to_string()), password.map(str::to_string))
@@ -382,12 +385,27 @@ fn ensure_no_case_insensitive_duplicate(config_dir: &Path, name: &str) -> Comman
     Ok(())
 }
 
-fn existing_environment_uses_scram(config_dir: &Path, name: &str) -> CommandResult<bool> {
+fn existing_environment_uses_secret(config_dir: &Path, name: &str) -> CommandResult<bool> {
     let Some(path) = find_environment_file_path(config_dir, name)? else {
         return Ok(false);
     };
     let metadata = read_metadata_file(&path)?;
-    Ok(metadata.name == name && metadata.auth_mode == EnvironmentAuthMode::SaslSslScramSha512)
+    Ok(metadata.name == name && environment_auth_mode_uses_secret(&metadata.auth_mode))
+}
+
+fn environment_auth_mode_uses_secret(auth_mode: &EnvironmentAuthMode) -> bool {
+    matches!(
+        auth_mode,
+        EnvironmentAuthMode::SaslSslPlain | EnvironmentAuthMode::SaslSslScramSha512
+    )
+}
+
+fn sasl_mechanism_for_auth_mode(auth_mode: &EnvironmentAuthMode) -> &'static str {
+    match auth_mode {
+        EnvironmentAuthMode::Plaintext => "PLAINTEXT",
+        EnvironmentAuthMode::SaslSslPlain => "PLAIN",
+        EnvironmentAuthMode::SaslSslScramSha512 => "SCRAM-SHA-512",
+    }
 }
 
 fn write_metadata(config_dir: &Path, metadata: &EnvironmentMetadata) -> CommandResult<()> {
@@ -441,7 +459,7 @@ fn validate_persisted_metadata(
     {
         return Err(MilenaCommandError::environment_brokers_required());
     }
-    if metadata.auth_mode == EnvironmentAuthMode::SaslSslScramSha512
+    if environment_auth_mode_uses_secret(&metadata.auth_mode)
         && metadata
             .username
             .as_deref()

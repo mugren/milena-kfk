@@ -119,7 +119,10 @@ export type DeleteEnvironmentResponse = {
   warning?: string | null;
 };
 
-export type EnvironmentAuthMode = "plaintext" | "saslSslScramSha512";
+export type EnvironmentAuthMode =
+  | "plaintext"
+  | "saslSslPlain"
+  | "saslSslScramSha512";
 
 export type RuntimeAuthConfig = {
   environment: string;

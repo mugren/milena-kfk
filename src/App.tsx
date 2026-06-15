@@ -8,6 +8,8 @@ import {
 } from "react";
 import {
   Edit3,
+  Eye,
+  EyeOff,
   Plus,
   RefreshCw,
   Save,
@@ -41,6 +43,7 @@ import {
   saveEnvironment,
   startKafkaConsumerSession,
   stopKafkaConsumerSession,
+  type MilenaCommandError,
   type MilenaBoundaryEvent,
   type SavedEnvironment,
 } from "./lib/tauri";
@@ -205,8 +208,7 @@ function App() {
             : `${environments.length} saved environments`,
       });
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Saved environments unavailable";
+      const message = errorMessage(cause, "Saved environments unavailable");
       setOnboarding(createOnboardingState({ environments: [] }));
       setChooserStatus({
         tone: "error",
@@ -299,7 +301,7 @@ function App() {
         message: response.warning ?? `Deleted ${environmentName}`,
       });
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "Delete failed";
+      const message = errorMessage(cause, "Delete failed");
       setChooserStatus({ tone: "error", message });
     }
   }
@@ -332,8 +334,7 @@ function App() {
         message: connectionSuccessMessage(topicList.topics.length),
       });
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Connection test failed";
+      const message = errorMessage(cause, "Connection test failed");
       setChooserStatus({ tone: "error", message });
     }
   }
@@ -353,8 +354,7 @@ function App() {
       rememberLastSelectedEnvironment(selectedEnvironment.name);
       setActiveRuntimeAuth(auth);
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Environment open failed";
+      const message = errorMessage(cause, "Environment open failed");
       setChooserStatus({ tone: "error", message });
     }
   }
@@ -405,11 +405,11 @@ function App() {
         brokers: environment.brokers,
         authMode: environment.authMode,
         username:
-          environment.authMode === "saslSslScramSha512"
+          isSaslAuthMode(environment.authMode)
             ? environment.username
             : null,
         password:
-          environment.authMode === "saslSslScramSha512"
+          isSaslAuthMode(environment.authMode)
             ? currentForm.values.password || null
             : null,
         advancedProperties: environment.advancedPropertiesText,
@@ -430,8 +430,7 @@ function App() {
         message: connectionSuccessMessage(topicList.topics.length),
       });
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Connection test failed";
+      const message = errorMessage(cause, "Connection test failed");
       setOnboarding((current) => {
         if (!current?.form || onboardingFormSignature(current.form) !== testSignature) {
           return current;
@@ -465,11 +464,11 @@ function App() {
         brokers: savedLocally.environment.brokers,
         authMode: savedLocally.environment.authMode,
         username:
-          savedLocally.environment.authMode === "saslSslScramSha512"
+          isSaslAuthMode(savedLocally.environment.authMode)
             ? savedLocally.environment.username
             : null,
         password:
-          savedLocally.environment.authMode === "saslSslScramSha512"
+          isSaslAuthMode(savedLocally.environment.authMode)
             ? currentForm.values.password || null
             : null,
         advancedProperties: savedLocally.environment.advancedPropertiesText,
@@ -502,7 +501,7 @@ function App() {
         message: `Saved ${savedEnvironment.name}`,
       });
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "Save failed";
+      const message = errorMessage(cause, "Save failed");
       setChooserStatus({ tone: "error", message });
       setOnboarding(onboarding);
     }
@@ -870,7 +869,8 @@ function EnvironmentForm({
   onTest: () => void;
   saving: boolean;
 }) {
-  const scram = form.values.authMode === "saslSslScramSha512";
+  const usesCredentials = isSaslAuthMode(form.values.authMode);
+  const [passwordVisible, setPasswordVisible] = useState(false);
 
   return (
     <form
@@ -908,6 +908,9 @@ function EnvironmentForm({
             <input
               aria-label="Environment name"
               type="text"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
               value={form.values.name}
               disabled={form.mode === "edit"}
               onChange={(event) => onFieldChange("name", event.currentTarget.value)}
@@ -920,6 +923,9 @@ function EnvironmentForm({
             <span>Brokers</span>
             <textarea
               aria-label="Kafka brokers"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
               value={form.values.brokersText}
               onChange={(event) =>
                 onFieldChange("brokersText", event.currentTarget.value)
@@ -937,12 +943,13 @@ function EnvironmentForm({
               onFieldChange("authMode", event.currentTarget.value as EnvironmentAuthMode)
             }
           >
-            <option value="plaintext">Plaintext</option>
+            <option value="plaintext">PLAINTEXT (no auth)</option>
+            <option value="saslSslPlain">SASL_SSL PLAIN</option>
             <option value="saslSslScramSha512">SASL_SSL SCRAM-SHA-512</option>
           </select>
         </label>
 
-        {scram ? (
+        {usesCredentials ? (
           <div className="credential-grid">
             <FieldError error={form.errors.username}>
               <label>
@@ -950,6 +957,9 @@ function EnvironmentForm({
                 <input
                   aria-label="Kafka username"
                   type="text"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  autoCorrect="off"
                   value={form.values.username}
                   onChange={(event) =>
                     onFieldChange("username", event.currentTarget.value)
@@ -960,15 +970,33 @@ function EnvironmentForm({
             <FieldError error={form.errors.password}>
               <label>
                 <span>Password</span>
-                <input
-                  aria-label="Kafka password"
-                  type="password"
-                  value={form.values.password}
-                  placeholder={form.mode === "edit" ? "Leave blank to keep" : ""}
-                  onChange={(event) =>
-                    onFieldChange("password", event.currentTarget.value)
-                  }
-                />
+                <div className="password-field">
+                  <input
+                    aria-label="Kafka password"
+                    type={passwordVisible ? "text" : "password"}
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    value={form.values.password}
+                    placeholder={form.mode === "edit" ? "Leave blank to keep" : ""}
+                    onChange={(event) =>
+                      onFieldChange("password", event.currentTarget.value)
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="icon-button password-preview-toggle"
+                    aria-label={passwordVisible ? "Hide Kafka password" : "Show Kafka password"}
+                    title={passwordVisible ? "Hide password" : "Show password"}
+                    onClick={() => setPasswordVisible((visible) => !visible)}
+                  >
+                    {passwordVisible ? (
+                      <EyeOff aria-hidden="true" size={14} strokeWidth={2} />
+                    ) : (
+                      <Eye aria-hidden="true" size={14} strokeWidth={2} />
+                    )}
+                  </button>
+                </div>
               </label>
             </FieldError>
           </div>
@@ -979,6 +1007,9 @@ function EnvironmentForm({
           <textarea
             aria-label="Advanced Kafka properties"
             className="advanced-properties"
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
             value={form.values.advancedPropertiesText}
             onChange={(event) =>
               onFieldChange("advancedPropertiesText", event.currentTarget.value)
@@ -1051,8 +1082,7 @@ export function WorkspaceShell({
     loadAppState()
       .then(setAppState)
       .catch((cause: unknown) => {
-        const message =
-          cause instanceof Error ? cause.message : "Tauri runtime unavailable";
+        const message = errorMessage(cause, "Tauri runtime unavailable");
         recordGlobalError("app", "Tauri runtime unavailable", message);
       });
   }, []);
@@ -1143,8 +1173,7 @@ export function WorkspaceShell({
         markTopicLoadSucceeded(current, key, topicList.topics),
       );
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Topic list refresh failed";
+      const message = errorMessage(cause, "Topic list refresh failed");
       setTopicRail((current) => markTopicLoadFailed(current, key, message));
       recordGlobalError("topics", "Topic list refresh failed", message);
     }
@@ -1243,8 +1272,7 @@ export function WorkspaceShell({
     if (replacedSessionId && replacedPane) {
       void stopKafkaConsumerSession({ sessionId: replacedSessionId }).catch(
         (cause: unknown) => {
-          const message =
-            cause instanceof Error ? cause.message : "Kafka consumer cleanup failed";
+          const message = errorMessage(cause, "Kafka consumer cleanup failed");
           recordGlobalError(
             "consumer",
             "Consumer cleanup failed",
@@ -2381,7 +2409,33 @@ function onboardingFormSignature(form: NonNullable<OnboardingState["form"]>): st
 }
 
 function authModeLabel(authMode: EnvironmentAuthMode): string {
-  return authMode === "saslSslScramSha512" ? "SCRAM" : "Plaintext";
+  if (authMode === "saslSslPlain") {
+    return "SASL_SSL PLAIN";
+  }
+  return authMode === "saslSslScramSha512" ? "SASL_SSL SCRAM" : "PLAINTEXT";
+}
+
+function isSaslAuthMode(authMode: EnvironmentAuthMode): boolean {
+  return authMode === "saslSslPlain" || authMode === "saslSslScramSha512";
+}
+
+function errorMessage(cause: unknown, fallback: string): string {
+  if (cause instanceof Error) {
+    return cause.message;
+  }
+  if (isMilenaCommandError(cause)) {
+    return cause.message;
+  }
+  return fallback;
+}
+
+function isMilenaCommandError(cause: unknown): cause is MilenaCommandError {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    typeof cause.message === "string"
+  );
 }
 
 function isEditableShortcutTarget(target: EventTarget | null): boolean {

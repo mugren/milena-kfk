@@ -1,5 +1,8 @@
 export type OnboardingMode = "list" | "add" | "edit";
-export type EnvironmentAuthMode = "plaintext" | "saslSslScramSha512";
+export type EnvironmentAuthMode =
+  | "plaintext"
+  | "saslSslPlain"
+  | "saslSslScramSha512";
 
 export type OnboardingEnvironment = {
   name: string;
@@ -455,13 +458,15 @@ export function validateOnboardingForm(
     errors.name = "Environment name already exists";
   }
 
-  if (form.values.authMode === "saslSslScramSha512") {
+  if (authModeUsesCredentials(form.values.authMode)) {
     if (!form.values.username.trim()) {
       errors.username = "Username is required";
     }
 
     const keepsExistingScramPassword =
-      form.mode === "edit" && form.originalAuthMode === "saslSslScramSha512";
+      form.mode === "edit" &&
+      form.originalAuthMode !== null &&
+      authModeUsesCredentials(form.originalAuthMode);
     if (!keepsExistingScramPassword && !form.values.password) {
       errors.password = "Password is required";
     }
@@ -481,6 +486,10 @@ export function validateOnboardingForm(
       advancedPropertiesText: form.values.advancedPropertiesText,
     },
   };
+}
+
+function authModeUsesCredentials(authMode: EnvironmentAuthMode): boolean {
+  return authMode === "saslSslPlain" || authMode === "saslSslScramSha512";
 }
 
 function parseBrokerList(value: string): string[] {

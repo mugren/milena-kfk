@@ -138,10 +138,11 @@ export function resetRendererHarness() {
     environment: request.name,
     brokers: request.brokers,
     properties:
-      request.authMode === "saslSslScramSha512"
+      request.authMode === "saslSslPlain" || request.authMode === "saslSslScramSha512"
         ? {
             "security.protocol": "SASL_SSL",
-            "sasl.mechanism": "SCRAM-SHA-512",
+            "sasl.mechanism":
+              request.authMode === "saslSslPlain" ? "PLAIN" : "SCRAM-SHA-512",
             "sasl.username": request.username ?? "",
             "sasl.password": request.password ?? "existing-secret",
           }

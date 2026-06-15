@@ -86,6 +86,7 @@ pub struct DeleteEnvironmentResponse {
 #[serde(rename_all = "camelCase")]
 pub enum EnvironmentAuthMode {
     Plaintext,
+    SaslSslPlain,
     SaslSslScramSha512,
 }
 
