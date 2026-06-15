@@ -1485,22 +1485,32 @@ export function WorkspaceShell({
             </div>
           </header>
           <section className="environment-summary">
-            <span>Cluster</span>
-            <button
-              className="refresh-button"
-              type="button"
-              onClick={changeActiveEnvironment}
-            >
-              Change environment
-            </button>
-            <button
-              className="refresh-button"
-              type="button"
-              disabled={topicRail.status === "loading"}
-              onClick={refreshTopicList}
-            >
-              Refresh
-            </button>
+            <div className="environment-summary-heading">
+              <span>Cluster</span>
+              <div className="environment-summary-actions">
+                {onChangeEnvironment ? (
+                  <button
+                    className="refresh-button secondary compact"
+                    type="button"
+                    aria-label="Change environment"
+                    title="Change environment"
+                    onClick={changeActiveEnvironment}
+                  >
+                    <ChevronDown aria-hidden="true" size={14} strokeWidth={2} />
+                    <span>Change</span>
+                  </button>
+                ) : null}
+                <button
+                  className="refresh-button secondary compact"
+                  type="button"
+                  disabled={topicRail.status === "loading"}
+                  onClick={refreshTopicList}
+                >
+                  <RefreshCw aria-hidden="true" size={14} strokeWidth={2} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
             <strong>{activeRuntimeAuth.brokers.join(", ")}</strong>
             <small>
               {topicRailStatus(topicRail.status, topicRail.topics.length)}
@@ -2200,7 +2210,6 @@ function MessageStreamRow({
           {message.expanded ? "-" : "+"}
         </span>
         <span className="message-meta">{message.receiveTime}</span>
-        <span className="topic-label">{message.topic}</span>
         <span className="message-meta">
           p{message.partition} / {message.offset}
         </span>

@@ -22,6 +22,7 @@ import {
   renderApp,
   resetRendererHarness,
   RightRail,
+  WorkspaceShell,
   tauri,
   topicOpenActions,
   topicPinStorageKey,
@@ -62,7 +63,27 @@ describe("App renderer flow harness", () => {
     const { readFileSync } = await import("node:fs");
     const appCss = readFileSync("src/App.css", "utf8");
     expect(appCss).toContain("font-family: -apple-system");
+    expect(appCss).toContain("--topics-rail-width: clamp(320px, 22vw, 360px)");
+    expect(appCss).toContain("var(--topics-rail-width)");
     expect(appCss).not.toContain("Inter");
+  });
+
+  it("shows change environment only when the workspace can return to the chooser", async () => {
+    const onChangeEnvironment = vi.fn();
+    renderApp();
+
+    expect(
+      screen.queryByRole("button", { name: "Change environment" }),
+    ).not.toBeInTheDocument();
+
+    cleanupRendererHarness();
+    resetRendererHarness();
+    const user = userEvent.setup();
+    render(<WorkspaceShell onChangeEnvironment={onChangeEnvironment} />);
+
+    await user.click(screen.getByRole("button", { name: "Change environment" }));
+
+    expect(onChangeEnvironment).toHaveBeenCalledWith("local-dev");
   });
 
   it("keeps hideable side columns with icon controls without losing pane state", async () => {
@@ -845,7 +866,9 @@ describe("App renderer flow harness", () => {
 
     expect(await screen.findByText("invalid JSON")).toBeVisible();
     expect(screen.getByText("{\"id\":")).toBeVisible();
-    expect(messageRowButton("orders.created")).toHaveClass("has-key");
+    const consumer = within(pane("1")).getByLabelText("Consumer for pane 1");
+    expect(within(consumer).queryByText("orders.created")).not.toBeInTheDocument();
+    expect(messageRowButton("{\"id\":")).toHaveClass("has-key");
 
     await user.selectOptions(
       screen.getByLabelText("Render mode for orders.created"),
@@ -856,8 +879,8 @@ describe("App renderer flow harness", () => {
     );
     expect(screen.queryByText("invalid JSON")).not.toBeInTheDocument();
 
-    await user.click(messageRowButton("orders.created"));
-    expect(messageRowButton("orders.created")).toHaveAttribute(
+    await user.click(messageRowButton("{\"id\":"));
+    expect(messageRowButton("{\"id\":")).toHaveAttribute(
       "aria-expanded",
       "true",
     );
@@ -891,8 +914,8 @@ describe("App renderer flow harness", () => {
     // @ts-ignore Vitest runs this assertion in Node; the renderer tsconfig has no Node types.
     const { readFileSync } = await import("node:fs");
     const appCss = readFileSync("src/App.css", "utf8");
-    expect(appCss).toMatch(/\.message-row-summary\.no-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(180px,\s*1fr\) minmax\(58px,\s*auto\) minmax\(0,\s*2fr\);/s);
-    expect(appCss).toMatch(/\.message-row-summary\.has-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(160px,\s*0\.9fr\) minmax\(58px,\s*auto\) minmax\(70px,\s*0\.45fr\) minmax\(0,\s*1\.65fr\);/s);
+    expect(appCss).toMatch(/\.message-row-summary\.no-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(58px,\s*auto\) minmax\(0,\s*1fr\);/s);
+    expect(appCss).toMatch(/\.message-row-summary\.has-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(58px,\s*auto\) minmax\(70px,\s*0\.35fr\) minmax\(0,\s*1fr\);/s);
     expect(appCss).toMatch(/\.message-preview code\s*{[^}]*min-width:\s*0;[^}]*flex:\s*1 1 auto;/s);
   });
 
