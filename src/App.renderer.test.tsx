@@ -456,6 +456,46 @@ describe("App renderer flow harness", () => {
     expect(pane("1")).toHaveTextContent("Inactive");
   });
 
+  it("filters consumer records by key or payload and highlights visible matches", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-1");
+
+    emit("session-1", kafkaRecord("session-1", {
+      key: "Order-Alpha-42",
+      offset: 42,
+      payload: "{\"status\":\"paid\"}",
+    }));
+    emit("session-1", kafkaRecord("session-1", {
+      key: "Invoice-Beta-9",
+      offset: 43,
+      payload: "{\"status\":\"queued\"}",
+    }));
+    emit("session-1", kafkaRecord("session-1", {
+      key: null,
+      offset: 44,
+      payload: "{\"event\":\"PaymentAuthorized\"}",
+    }));
+
+    const paneOne = pane("1");
+    const filter = within(paneOne).getByLabelText("Filter records for pane 1");
+
+    await user.type(filter, "alpha");
+    expect(messageRowButton("Order-Alpha-42")).toBeVisible();
+    expect(paneOne).not.toHaveTextContent("Invoice-Beta-9");
+    expect(paneOne).not.toHaveTextContent("PaymentAuthorized");
+    expect(within(messageRowButton("Order-Alpha-42")).getByText("Alpha").tagName)
+      .toBe("MARK");
+
+    await user.clear(filter);
+    await user.type(filter, "paymentauthorized");
+    expect(paneOne).not.toHaveTextContent("Order-Alpha-42");
+    expect(screen.getByText("PaymentAuthorized")).toBeVisible();
+    expect(screen.getByText("PaymentAuthorized").tagName).toBe("MARK");
+  });
+
   it("uses one stateful pane session button while starting, polling, and stopped", async () => {
     const user = userEvent.setup();
     const onPoll = vi.fn();

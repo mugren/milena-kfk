@@ -1233,18 +1233,46 @@ button:disabled {
 }
 
 .consumer-controls {
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
 }
 
+.consumer-filter-control,
 .render-mode-control {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   color: var(--muted);
   font-size: 10px;
   font-weight: 650;
+}
+
+.consumer-filter-control {
+  flex: 1 1 170px;
+  max-width: 260px;
+}
+
+.consumer-filter-control input {
+  width: 100%;
+  min-width: 96px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 7px;
+  background: var(--input);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.consumer-filter-control svg {
+  flex: 0 0 auto;
+  color: var(--muted);
 }
 
 .render-mode-control select {
@@ -1457,6 +1485,13 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.message-match {
+  border-radius: 3px;
+  padding: 0 1px;
+  background: rgba(169, 101, 18, 0.22);
+  color: inherit;
 }
 
 .message-marker {

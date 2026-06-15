@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   Trash2,
   ChevronDown,
   ChevronUp,
@@ -62,6 +63,7 @@ import {
   stopPanePollingSession,
 } from "./lib/polling";
 import {
+  consumerRecordMatchesFilter,
   removeMessageRenderPreferencesForEnvironment,
   readMessageRenderPreferences,
   renderKafkaRecord,
@@ -1910,10 +1912,15 @@ export function Pane({
     () => new Set(),
   );
   const [publisherExpanded, setPublisherExpanded] = useState(false);
+  const [consumerFilter, setConsumerFilter] = useState("");
   useEffect(() => {
     setPublisherExpanded(false);
+    setConsumerFilter("");
   }, [pane.id, pane.topic]);
   const recordEvents = pane.activity.filter(isKafkaRecordEvent);
+  const visibleRecordEvents = recordEvents.filter((event) =>
+    consumerRecordMatchesFilter(event.data.record, consumerFilter),
+  );
   const payloadValidation = validatePublisherPayload(publisher.payload);
   const canSend = canSendPublisherRecord(pane, publisher);
   const publisherReadiness = publisherReadinessLabel(
@@ -2060,25 +2067,43 @@ export function Pane({
             <span className="eyebrow">Consumer</span>
             <div className="consumer-controls">
               {pane.topic ? (
-                <label
-                  className="render-mode-control"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <span>Render</span>
-                  <select
-                    aria-label={`Render mode for ${pane.topic}`}
-                    value={renderMode}
-                    onChange={(event) =>
-                      onRenderModeChange(
-                        pane.topic ?? "",
-                        event.currentTarget.value as MessageRenderMode,
-                      )
-                    }
+                <>
+                  <label
+                    className="consumer-filter-control"
+                    onClick={(event) => event.stopPropagation()}
                   >
-                    <option value="json">JSON</option>
-                    <option value="raw">Raw</option>
-                  </select>
-                </label>
+                    <Search aria-hidden="true" size={12} strokeWidth={2} />
+                    <span>Filter</span>
+                    <input
+                      aria-label={`Filter records for pane ${pane.id}`}
+                      type="search"
+                      placeholder="Key or payload"
+                      value={consumerFilter}
+                      onChange={(event) =>
+                        setConsumerFilter(event.currentTarget.value)
+                      }
+                    />
+                  </label>
+                  <label
+                    className="render-mode-control"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <span>Render</span>
+                    <select
+                      aria-label={`Render mode for ${pane.topic}`}
+                      value={renderMode}
+                      onChange={(event) =>
+                        onRenderModeChange(
+                          pane.topic ?? "",
+                          event.currentTarget.value as MessageRenderMode,
+                        )
+                      }
+                    >
+                      <option value="json">JSON</option>
+                      <option value="raw">Raw</option>
+                    </select>
+                  </label>
+                </>
               ) : null}
               <button
                 className="secondary compact consumer-clear-button"
@@ -2097,8 +2122,10 @@ export function Pane({
           <div className="message-stream">
             {recordEvents.length === 0 ? (
               <p className="empty-state">Inactive</p>
+            ) : visibleRecordEvents.length === 0 ? (
+              <p className="empty-state">No matching records</p>
             ) : (
-              recordEvents.map((event) => {
+              visibleRecordEvents.map((event) => {
                 const collapsed = renderKafkaRecord(event.data.record, {
                   mode: renderMode,
                 });
@@ -2111,6 +2138,7 @@ export function Pane({
                   <MessageStreamRow
                     key={rendered.identity}
                     message={rendered}
+                    filter={consumerFilter}
                     onToggle={() => toggleRow(rendered.identity)}
                   />
                 );
@@ -2209,9 +2237,11 @@ export function Pane({
 
 function MessageStreamRow({
   message,
+  filter,
   onToggle,
 }: {
   message: RenderedKafkaRecord;
+  filter: string;
   onToggle: () => void;
 }) {
   return (
@@ -2238,13 +2268,15 @@ function MessageStreamRow({
           p{message.partition} / {message.offset}
         </span>
         {message.key ? (
-          <span className="message-key">key {message.key}</span>
+          <span className="message-key">
+            key {renderHighlightedText(message.key, filter)}
+          </span>
         ) : null}
         <span className="message-preview">
           {message.payload.marker ? (
             <span className="message-marker">{message.payload.marker}</span>
           ) : null}
-          <code>{message.payload.preview}</code>
+          <code>{renderHighlightedText(message.payload.preview, filter)}</code>
           {message.payload.previewTruncated ? (
             <span className="message-marker">truncated</span>
           ) : null}
@@ -2253,7 +2285,7 @@ function MessageStreamRow({
 
       {message.expanded ? (
         <div className="message-expanded">
-          <pre>{message.payload.content}</pre>
+          <pre>{renderHighlightedText(message.payload.content, filter)}</pre>
           {message.payload.contentTruncated ? (
             <span className="message-marker">payload truncated</span>
           ) : null}
@@ -2276,6 +2308,40 @@ function MessageStreamRow({
       ) : null}
     </article>
   );
+}
+
+function renderHighlightedText(text: string, filter: string): ReactNode {
+  const query = filter.trim();
+  if (!query) {
+    return text;
+  }
+
+  const lowerText = text.toLocaleLowerCase();
+  const lowerQuery = query.toLocaleLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let matchIndex = lowerText.indexOf(lowerQuery);
+
+  while (matchIndex !== -1) {
+    if (matchIndex > cursor) {
+      parts.push(text.slice(cursor, matchIndex));
+    }
+
+    const matchEnd = matchIndex + query.length;
+    parts.push(
+      <mark className="message-match" key={`${matchIndex}-${matchEnd}`}>
+        {text.slice(matchIndex, matchEnd)}
+      </mark>,
+    );
+    cursor = matchEnd;
+    matchIndex = lowerText.indexOf(lowerQuery, cursor);
+  }
+
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+
+  return parts;
 }
 
 function TopicContextMenu({
