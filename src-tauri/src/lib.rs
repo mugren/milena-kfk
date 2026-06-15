@@ -3,17 +3,16 @@ use tauri::Manager;
 
 pub mod command_boundary;
 pub mod contracts;
-pub mod environment_import;
 pub mod environments;
 pub mod kafka_adapter;
 
 use contracts::{
-    AppState, CommandResult, ImportKafkaShellEnvironmentRequest,
-    ImportKafkaShellEnvironmentResponse, KafkaConsumerSession, KafkaTopicList,
-    ListKafkaTopicsRequest, MilenaBoundaryEvent, PublishKafkaRecordRequest,
-    PublishKafkaRecordResponse, RuntimeAuthConfig, SaveEnvironmentRequest, SavedEnvironment,
-    StartKafkaConsumerSessionRequest, StopKafkaConsumerSessionRequest,
-    StopKafkaConsumerSessionResponse, TopicSessionPreview, TopicSessionPreviewRequest,
+    AppState, CommandResult, DeleteEnvironmentResponse, KafkaConsumerSession, KafkaTopicList,
+    ListKafkaTopicsRequest, ListSavedEnvironmentsResponse, MilenaBoundaryEvent, MilenaCommandError,
+    PublishKafkaRecordRequest, PublishKafkaRecordResponse, RuntimeAuthConfig,
+    SaveEnvironmentRequest, SavedEnvironment, StartKafkaConsumerSessionRequest,
+    StopKafkaConsumerSessionRequest, StopKafkaConsumerSessionResponse, TopicSessionPreview,
+    TopicSessionPreviewRequest,
 };
 use environments::MacosKeychainEnvironmentSecretStore;
 use kafka_adapter::NativeKafkaAdapter;
@@ -53,6 +52,27 @@ fn load_environment(app_handle: tauri::AppHandle, name: String) -> CommandResult
 }
 
 #[tauri::command]
+fn list_environments(app_handle: tauri::AppHandle) -> CommandResult<ListSavedEnvironmentsResponse> {
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(contracts::MilenaCommandError::environment_storage_failed)?;
+    environments::list_environments(&config_dir)
+}
+
+#[tauri::command]
+fn delete_environment(
+    app_handle: tauri::AppHandle,
+    name: String,
+) -> CommandResult<DeleteEnvironmentResponse> {
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(contracts::MilenaCommandError::environment_storage_failed)?;
+    environments::delete_environment(&config_dir, &name, &MacosKeychainEnvironmentSecretStore)
+}
+
+#[tauri::command]
 fn materialize_runtime_auth_config(
     app_handle: tauri::AppHandle,
     name: String,
@@ -69,15 +89,15 @@ fn materialize_runtime_auth_config(
 }
 
 #[tauri::command]
-fn import_kafka_shell_environment(
+fn materialize_temporary_runtime_auth_config(
     app_handle: tauri::AppHandle,
-    request: ImportKafkaShellEnvironmentRequest,
-) -> CommandResult<ImportKafkaShellEnvironmentResponse> {
+    request: SaveEnvironmentRequest,
+) -> CommandResult<RuntimeAuthConfig> {
     let config_dir = app_handle
         .path()
         .app_config_dir()
         .map_err(contracts::MilenaCommandError::environment_storage_failed)?;
-    environment_import::import_kafka_shell_environment(
+    environments::materialize_temporary_runtime_auth_config(
         &config_dir,
         request,
         &MacosKeychainEnvironmentSecretStore,
@@ -85,36 +105,61 @@ fn import_kafka_shell_environment(
 }
 
 #[tauri::command]
-fn list_kafka_topics(
+async fn list_kafka_topics(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: ListKafkaTopicsRequest,
 ) -> CommandResult<KafkaTopicList> {
-    command_boundary::list_kafka_topics(request, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || command_boundary::list_kafka_topics(request, &kafka)).await
 }
 
 #[tauri::command]
-fn publish_kafka_record(
+async fn publish_kafka_record(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: PublishKafkaRecordRequest,
 ) -> CommandResult<PublishKafkaRecordResponse> {
-    command_boundary::publish_kafka_record(request, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || command_boundary::publish_kafka_record(request, &kafka))
+        .await
 }
 
 #[tauri::command]
-fn start_kafka_consumer_session(
+async fn start_kafka_consumer_session(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: StartKafkaConsumerSessionRequest,
     on_event: Channel<MilenaBoundaryEvent>,
 ) -> CommandResult<KafkaConsumerSession> {
-    command_boundary::start_kafka_consumer_session(request, on_event, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || {
+        command_boundary::start_kafka_consumer_session(request, on_event, &kafka)
+    })
+    .await
 }
 
 #[tauri::command]
-fn stop_kafka_consumer_session(
+async fn stop_kafka_consumer_session(
     kafka: tauri::State<'_, NativeKafkaAdapter>,
     request: StopKafkaConsumerSessionRequest,
 ) -> CommandResult<StopKafkaConsumerSessionResponse> {
-    command_boundary::stop_kafka_consumer_session(request, &*kafka)
+    let kafka = kafka.inner().clone();
+    run_blocking_kafka_command(move || {
+        command_boundary::stop_kafka_consumer_session(request, &kafka)
+    })
+    .await
+}
+
+async fn run_blocking_kafka_command<T, F>(command: F) -> CommandResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CommandResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(command)
+        .await
+        .map_err(|error| {
+            MilenaCommandError::kafka_operation_failed(format!(
+                "Kafka command worker failed: {error}"
+            ))
+        })?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -126,8 +171,10 @@ pub fn run() {
             preview_topic_session,
             save_environment,
             load_environment,
+            list_environments,
+            delete_environment,
             materialize_runtime_auth_config,
-            import_kafka_shell_environment,
+            materialize_temporary_runtime_auth_config,
             list_kafka_topics,
             publish_kafka_record,
             start_kafka_consumer_session,

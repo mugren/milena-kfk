@@ -31,13 +31,12 @@ export type MilenaCommandErrorCode =
   | "environment-brokers-required"
   | "environment-username-required"
   | "environment-password-required"
-  | "environment-auth-template-required"
+  | "environment-duplicate-name"
   | "environment-not-found"
   | "environment-storage-failed"
   | "environment-secret-store-failed"
   | "environment-secret-missing"
-  | "environment-auth-template-invalid"
-  | "environment-import-invalid"
+  | "environment-advanced-properties-invalid"
   | "kafka-auth-unsupported"
   | "kafka-operation-failed"
   | "kafka-session-not-found"
@@ -96,28 +95,34 @@ export type MilenaBoundaryEvent =
 export type SaveEnvironmentRequest = {
   name: string;
   brokers: string[];
-  username: string;
-  password: string;
-  authPropertiesTemplate: string;
+  authMode: EnvironmentAuthMode;
+  username?: string | null;
+  password?: string | null;
+  advancedProperties: string;
 };
 
 export type SavedEnvironment = {
+  schemaVersion: number;
   name: string;
   brokers: string[];
-  username: string;
-  authPropertiesTemplate: string;
-  passwordSecretRef: string;
+  authMode: EnvironmentAuthMode;
+  username?: string | null;
+  advancedProperties: string;
 };
 
-export type ImportKafkaShellEnvironmentRequest = {
-  environmentName: string;
-  environmentFilePath: string;
-  authPropertiesPath: string;
+export type ListSavedEnvironmentsResponse = {
+  environments: SavedEnvironment[];
 };
 
-export type ImportKafkaShellEnvironmentResponse = {
-  environment: SavedEnvironment;
+export type DeleteEnvironmentResponse = {
+  name: string;
+  warning?: string | null;
 };
+
+export type EnvironmentAuthMode =
+  | "plaintext"
+  | "saslSslPlain"
+  | "saslSslScramSha512";
 
 export type RuntimeAuthConfig = {
   environment: string;
@@ -226,13 +231,32 @@ export async function saveEnvironment(
   return invoke<SavedEnvironment>("save_environment", { request });
 }
 
-export async function importKafkaShellEnvironment(
-  request: ImportKafkaShellEnvironmentRequest,
-): Promise<ImportKafkaShellEnvironmentResponse> {
-  return invoke<ImportKafkaShellEnvironmentResponse>(
-    "import_kafka_shell_environment",
-    { request },
-  );
+export async function loadEnvironment(name: string): Promise<SavedEnvironment> {
+  return invoke<SavedEnvironment>("load_environment", { name });
+}
+
+export async function listEnvironments(): Promise<ListSavedEnvironmentsResponse> {
+  return invoke<ListSavedEnvironmentsResponse>("list_environments");
+}
+
+export async function deleteEnvironment(
+  name: string,
+): Promise<DeleteEnvironmentResponse> {
+  return invoke<DeleteEnvironmentResponse>("delete_environment", { name });
+}
+
+export async function materializeRuntimeAuthConfig(
+  name: string,
+): Promise<RuntimeAuthConfig> {
+  return invoke<RuntimeAuthConfig>("materialize_runtime_auth_config", { name });
+}
+
+export async function materializeTemporaryRuntimeAuthConfig(
+  request: SaveEnvironmentRequest,
+): Promise<RuntimeAuthConfig> {
+  return invoke<RuntimeAuthConfig>("materialize_temporary_runtime_auth_config", {
+    request,
+  });
 }
 
 export async function listKafkaTopics(

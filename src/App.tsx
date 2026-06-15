@@ -1,5 +1,19 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
+import {
+  Edit3,
+  Eye,
+  EyeOff,
+  Plus,
+  RefreshCw,
+  Save,
+  Trash2,
   ChevronDown,
   ChevronUp,
   Maximize2,
@@ -19,12 +33,20 @@ import {
 import {
   AppState,
   RuntimeAuthConfig,
+  deleteEnvironment,
+  listEnvironments,
   listKafkaTopics,
   loadAppState,
+  materializeRuntimeAuthConfig,
+  materializeTemporaryRuntimeAuthConfig,
   publishKafkaRecord,
+  saveEnvironment,
   startKafkaConsumerSession,
   stopKafkaConsumerSession,
+  type MilenaCommandError,
   type MilenaBoundaryEvent,
+  type KafkaTopicMetadata,
+  type SavedEnvironment,
 } from "./lib/tauri";
 import {
   appendBoundaryEventActivity,
@@ -40,6 +62,7 @@ import {
   stopPanePollingSession,
 } from "./lib/polling";
 import {
+  removeMessageRenderPreferencesForEnvironment,
   readMessageRenderPreferences,
   renderKafkaRecord,
   setTopicMessageRenderMode,
@@ -69,6 +92,7 @@ import {
   markTopicLoadStarted,
   markTopicLoadSucceeded,
   openTopicEnvironment,
+  removePinnedTopicsForEnvironment,
   setTopicSearch,
   toggleTopicPin,
   visibleTopicRows,
@@ -76,6 +100,7 @@ import {
 } from "./lib/topics";
 import {
   canStartPaneSession,
+  clearPaneActivity,
   createInitialWorkspaceState,
   expandPane as expandWorkspacePaneState,
   getSelectedPane,
@@ -90,6 +115,25 @@ import {
   type WorkspacePane,
   type WorkspaceState,
 } from "./lib/workspace";
+import {
+  cancelOnboardingForm,
+  cancelDeleteEnvironment,
+  confirmDeleteEnvironment,
+  createOnboardingState,
+  getSelectedEnvironment,
+  requestDeleteEnvironment,
+  saveOnboardingForm,
+  selectEnvironment,
+  setOnboardingFormTestResult,
+  setOnboardingFormField,
+  startAddEnvironment,
+  startEditEnvironment,
+  validateOnboardingForm,
+  type EnvironmentAuthMode,
+  type OnboardingEnvironment,
+  type OnboardingFormValues,
+  type OnboardingState,
+} from "./lib/onboarding";
 
 type TopicMenuState = {
   topic: string;
@@ -108,9 +152,15 @@ type VisibleColumns = {
   inspector: boolean;
 };
 
-const APP_SHELL_NAME = "Milena - Kafka Reader";
+type TestedTopicList = {
+  environmentSignature: string;
+  topics: KafkaTopicMetadata[];
+};
 
-const activeRuntimeAuth: RuntimeAuthConfig = {
+const APP_SHELL_NAME = "Milena - Kafka Reader";
+const LAST_SELECTED_ENVIRONMENT_KEY = "milena.lastSelectedEnvironment.v1";
+
+const localDevRuntimeAuth: RuntimeAuthConfig = {
   environment: "local-dev",
   brokers: ["localhost:19092"],
   properties: {
@@ -124,10 +174,926 @@ const activeRuntimeAuth: RuntimeAuthConfig = {
 };
 
 function App() {
+  const [activeRuntimeAuth, setActiveRuntimeAuth] =
+    useState<RuntimeAuthConfig | null>(null);
+  const [initialWorkspaceTopics, setInitialWorkspaceTopics] =
+    useState<KafkaTopicMetadata[] | null>(null);
+  const [testedTopicList, setTestedTopicList] = useState<TestedTopicList | null>(
+    null,
+  );
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  const [chooserStatus, setChooserStatus] = useState<ChooserStatus>({
+    tone: "loading",
+    message: "Loading environments",
+  });
+
+  useEffect(() => {
+    document.title = APP_SHELL_NAME;
+  }, []);
+
+  useEffect(() => {
+    void refreshEnvironments("quiet");
+  }, []);
+
+  async function refreshEnvironments(mode: "quiet" | "manual" = "manual") {
+    setChooserStatus({
+      tone: "loading",
+      message: mode === "manual" ? "Refreshing environments" : "Loading environments",
+    });
+
+    try {
+      const response = await listEnvironments();
+      const environments = response.environments.map(toOnboardingEnvironment);
+      const state = createOnboardingState({
+        environments,
+        lastSelectedEnvironmentName: readLastSelectedEnvironmentName(),
+      });
+      setOnboarding(state);
+      if (state.selectedEnvironmentName) {
+        rememberLastSelectedEnvironment(state.selectedEnvironmentName);
+      }
+      setChooserStatus({
+        tone: "idle",
+        message:
+          environments.length === 0
+            ? "No saved environments"
+            : `${environments.length} saved environments`,
+      });
+    } catch (cause) {
+      const message = errorMessage(cause, "Saved environments unavailable");
+      setOnboarding(createOnboardingState({ environments: [] }));
+      setChooserStatus({
+        tone: "error",
+        message,
+      });
+    }
+  }
+
+  function updateOnboarding(update: (current: OnboardingState) => OnboardingState) {
+    setOnboarding((current) => (current ? update(current) : current));
+  }
+
+  function chooseEnvironment(environmentName: string) {
+    updateOnboarding((current) => {
+      const next = selectEnvironment(current, environmentName);
+      if (next.selectedEnvironmentName) {
+        rememberLastSelectedEnvironment(next.selectedEnvironmentName);
+      }
+      return next;
+    });
+    setChooserStatus({ tone: "idle", message: `${environmentName} selected` });
+  }
+
+  function startAdd() {
+    updateOnboarding(startAddEnvironment);
+    setChooserStatus({ tone: "idle", message: "New environment" });
+  }
+
+  function startEdit() {
+    updateOnboarding(startEditEnvironment);
+    setChooserStatus({ tone: "idle", message: "Editing environment" });
+  }
+
+  function cancelForm() {
+    updateOnboarding(cancelOnboardingForm);
+    setChooserStatus({ tone: "idle", message: "Chooser ready" });
+  }
+
+  function requestDelete() {
+    if (!onboarding) {
+      return;
+    }
+
+    const selectedEnvironment = getSelectedEnvironment(onboarding);
+    if (!selectedEnvironment) {
+      return;
+    }
+
+    setOnboarding(requestDeleteEnvironment(onboarding, selectedEnvironment.name));
+    setChooserStatus({
+      tone: "idle",
+      message: `Confirm delete ${selectedEnvironment.name}`,
+    });
+  }
+
+  function cancelDelete() {
+    updateOnboarding(cancelDeleteEnvironment);
+    setChooserStatus({ tone: "idle", message: "Delete cancelled" });
+  }
+
+  async function confirmDelete() {
+    const environmentName = onboarding?.deleteConfirmation?.environmentName;
+    if (!environmentName) {
+      return;
+    }
+
+    setChooserStatus({ tone: "loading", message: `Deleting ${environmentName}` });
+    try {
+      const response = await deleteEnvironment(environmentName);
+      removePinnedTopicsForEnvironment(environmentName, getTopicPinStore());
+      removeMessageRenderPreferencesForEnvironment(
+        environmentName,
+        getMessageRenderPreferenceStore(),
+      );
+      setOnboarding((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const next = confirmDeleteEnvironment(current);
+        if (next.selectedEnvironmentName) {
+          rememberLastSelectedEnvironment(next.selectedEnvironmentName);
+        } else {
+          forgetLastSelectedEnvironment();
+        }
+        return next;
+      });
+      setChooserStatus({
+        tone: response.warning ? "warning" : "success",
+        message: response.warning ?? `Deleted ${environmentName}`,
+      });
+    } catch (cause) {
+      const message = errorMessage(cause, "Delete failed");
+      setChooserStatus({ tone: "error", message });
+    }
+  }
+
+  function setFormField<K extends keyof OnboardingFormValues>(
+    field: K,
+    value: OnboardingFormValues[K],
+  ) {
+    if (onboarding?.form?.testResult) {
+      setChooserStatus({
+        tone: "idle",
+        message: onboarding.form.mode === "add" ? "New environment" : "Editing environment",
+      });
+    }
+    updateOnboarding((current) => setOnboardingFormField(current, field, value));
+  }
+
+  async function testSelectedEnvironment() {
+    const selectedEnvironment = onboarding ? getSelectedEnvironment(onboarding) : null;
+    if (!selectedEnvironment) {
+      return;
+    }
+
+    setChooserStatus({ tone: "loading", message: "Testing connection" });
+    try {
+      const auth = await materializeRuntimeAuthConfig(selectedEnvironment.name);
+      const topicList = await listKafkaTopics({ auth });
+      setTestedTopicList({
+        environmentSignature: onboardingEnvironmentSignature(selectedEnvironment),
+        topics: topicList.topics,
+      });
+      setChooserStatus({
+        tone: "success",
+        message: connectionSuccessMessage(topicList.topics.length),
+      });
+    } catch (cause) {
+      const message = errorMessage(cause, "Connection test failed");
+      setChooserStatus({ tone: "error", message });
+    }
+  }
+
+  async function openSelectedEnvironment() {
+    const selectedEnvironment = onboarding ? getSelectedEnvironment(onboarding) : null;
+    if (!selectedEnvironment) {
+      return;
+    }
+
+    setChooserStatus({
+      tone: "loading",
+      message: `Opening ${selectedEnvironment.name}`,
+    });
+    try {
+      const auth = await materializeRuntimeAuthConfig(selectedEnvironment.name);
+      rememberLastSelectedEnvironment(selectedEnvironment.name);
+      const testedTopics =
+        testedTopicList?.environmentSignature ===
+        onboardingEnvironmentSignature(selectedEnvironment)
+          ? testedTopicList.topics
+          : null;
+      setInitialWorkspaceTopics(testedTopics);
+      setActiveRuntimeAuth(auth);
+    } catch (cause) {
+      const message = errorMessage(cause, "Environment open failed");
+      setInitialWorkspaceTopics(null);
+      setChooserStatus({ tone: "error", message });
+    }
+  }
+
+  function changeEnvironment(environmentName: string) {
+    setActiveRuntimeAuth(null);
+    updateOnboarding((current) => {
+      const next = selectEnvironment(current, environmentName);
+      if (next.selectedEnvironmentName) {
+        rememberLastSelectedEnvironment(next.selectedEnvironmentName);
+      }
+      return next;
+    });
+    setInitialWorkspaceTopics(null);
+    setChooserStatus({ tone: "idle", message: `${environmentName} selected` });
+  }
+
+  async function testFormConnection() {
+    if (!onboarding?.form) {
+      return;
+    }
+
+    const currentForm = onboarding.form;
+    const testSignature = onboardingFormSignature(currentForm);
+    const validation = validateOnboardingForm(currentForm, onboarding.environments);
+    if (!validation.ok) {
+      setOnboarding((current) => {
+        if (!current?.form) {
+          return current;
+        }
+        return {
+          ...current,
+          form: {
+            ...current.form,
+            errors: validation.errors,
+            testResult: null,
+          },
+        };
+      });
+      setChooserStatus({ tone: "error", message: "Fix highlighted fields" });
+      return;
+    }
+
+    setChooserStatus({ tone: "loading", message: "Testing connection" });
+    try {
+      const environment = validation.environment;
+      const auth = await materializeTemporaryRuntimeAuthConfig({
+        name: environment.name,
+        brokers: environment.brokers,
+        authMode: environment.authMode,
+        username:
+          isSaslAuthMode(environment.authMode)
+            ? environment.username
+            : null,
+        password:
+          isSaslAuthMode(environment.authMode)
+            ? currentForm.values.password || null
+            : null,
+        advancedProperties: environment.advancedPropertiesText,
+      });
+      const topicList = await listKafkaTopics({ auth });
+      const message = `Test passed: ${pluralizeTopics(topicList.topics.length)}`;
+      setTestedTopicList({
+        environmentSignature: onboardingEnvironmentSignature(environment),
+        topics: topicList.topics,
+      });
+      setOnboarding((current) => {
+        if (!current?.form || onboardingFormSignature(current.form) !== testSignature) {
+          return current;
+        }
+        return setOnboardingFormTestResult(current, {
+          status: "success",
+          message,
+        });
+      });
+      setChooserStatus({
+        tone: "success",
+        message: connectionSuccessMessage(topicList.topics.length),
+      });
+    } catch (cause) {
+      const message = errorMessage(cause, "Connection test failed");
+      setOnboarding((current) => {
+        if (!current?.form || onboardingFormSignature(current.form) !== testSignature) {
+          return current;
+        }
+        return setOnboardingFormTestResult(current, {
+          status: "error",
+          message,
+        });
+      });
+      setChooserStatus({ tone: "error", message });
+    }
+  }
+
+  async function saveForm() {
+    if (!onboarding?.form) {
+      return;
+    }
+
+    const currentForm = onboarding.form;
+    const savedLocally = saveOnboardingForm(onboarding);
+    if (!savedLocally.ok) {
+      setOnboarding(savedLocally.state);
+      setChooserStatus({ tone: "error", message: "Fix highlighted fields" });
+      return;
+    }
+
+    setChooserStatus({ tone: "loading", message: "Saving environment" });
+    try {
+      const saved = await saveEnvironment({
+        name: savedLocally.environment.name,
+        brokers: savedLocally.environment.brokers,
+        authMode: savedLocally.environment.authMode,
+        username:
+          isSaslAuthMode(savedLocally.environment.authMode)
+            ? savedLocally.environment.username
+            : null,
+        password:
+          isSaslAuthMode(savedLocally.environment.authMode)
+            ? currentForm.values.password || null
+            : null,
+        advancedProperties: savedLocally.environment.advancedPropertiesText,
+      });
+      const savedEnvironment = toOnboardingEnvironment(saved);
+      setOnboarding((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const environments =
+          current.environments.some(
+            (environment) => environment.name === savedEnvironment.name,
+          )
+            ? current.environments.map((environment) =>
+                environment.name === savedEnvironment.name
+                  ? savedEnvironment
+                  : environment,
+              )
+            : [...current.environments, savedEnvironment];
+        const next = createOnboardingState({
+          environments,
+          lastSelectedEnvironmentName: savedEnvironment.name,
+        });
+        rememberLastSelectedEnvironment(savedEnvironment.name);
+        return next;
+      });
+      setChooserStatus({
+        tone: "success",
+        message: `Saved ${savedEnvironment.name}`,
+      });
+    } catch (cause) {
+      const message = errorMessage(cause, "Save failed");
+      setChooserStatus({ tone: "error", message });
+      setOnboarding(onboarding);
+    }
+  }
+
+  if (activeRuntimeAuth) {
+    return (
+      <WorkspaceShell
+        activeRuntimeAuth={activeRuntimeAuth}
+        autoLoadTopics={initialWorkspaceTopics === null}
+        initialTopics={initialWorkspaceTopics}
+        onChangeEnvironment={changeEnvironment}
+      />
+    );
+  }
+
+  return (
+    <EnvironmentChooser
+      onboarding={onboarding}
+      status={chooserStatus}
+      onAdd={startAdd}
+      onCancel={cancelForm}
+      onCancelDelete={cancelDelete}
+      onConfirmDelete={() => void confirmDelete()}
+      onEdit={startEdit}
+      onFieldChange={setFormField}
+      onRefresh={() => void refreshEnvironments("manual")}
+      onRequestDelete={requestDelete}
+      onSave={() => void saveForm()}
+      onSelect={chooseEnvironment}
+      onOpen={() => void openSelectedEnvironment()}
+      onTestForm={() => void testFormConnection()}
+      onTestSelected={() => void testSelectedEnvironment()}
+    />
+  );
+}
+
+type ChooserStatus = {
+  tone: "idle" | "loading" | "success" | "warning" | "error";
+  message: string;
+};
+
+function EnvironmentChooser({
+  onboarding,
+  status,
+  onAdd,
+  onCancel,
+  onCancelDelete,
+  onConfirmDelete,
+  onEdit,
+  onFieldChange,
+  onOpen,
+  onRefresh,
+  onRequestDelete,
+  onSave,
+  onSelect,
+  onTestForm,
+  onTestSelected,
+}: {
+  onboarding: OnboardingState | null;
+  status: ChooserStatus;
+  onAdd: () => void;
+  onCancel: () => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
+  onEdit: () => void;
+  onFieldChange: <K extends keyof OnboardingFormValues>(
+    field: K,
+    value: OnboardingFormValues[K],
+  ) => void;
+  onOpen: () => void;
+  onRefresh: () => void;
+  onRequestDelete: () => void;
+  onSave: () => void;
+  onSelect: (environmentName: string) => void;
+  onTestForm: () => void;
+  onTestSelected: () => void;
+}) {
+  const selectedEnvironment = onboarding ? getSelectedEnvironment(onboarding) : null;
+  const deleteConfirmation = onboarding?.deleteConfirmation ?? null;
+  const form = onboarding?.form ?? null;
+  const environments = onboarding?.environments ?? [];
+  const busy = status.tone === "loading";
+
+  useEffect(() => {
+    function handleChooserKeyDown(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey
+      ) {
+        return;
+      }
+
+      if (event.key === "Escape") {
+        if (deleteConfirmation) {
+          event.preventDefault();
+          onCancelDelete();
+          return;
+        }
+        if (form) {
+          event.preventDefault();
+          onCancel();
+        }
+        return;
+      }
+
+      if (
+        event.key !== "Enter" ||
+        busy ||
+        !selectedEnvironment ||
+        form ||
+        deleteConfirmation ||
+        onboarding?.mode !== "list" ||
+        isEditableShortcutTarget(event.target)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      onOpen();
+    }
+
+    window.addEventListener("keydown", handleChooserKeyDown);
+    return () => window.removeEventListener("keydown", handleChooserKeyDown);
+  }, [
+    busy,
+    deleteConfirmation,
+    form,
+    onboarding?.mode,
+    onCancel,
+    onCancelDelete,
+    onOpen,
+    selectedEnvironment,
+  ]);
+
+  return (
+    <main className="chooser-shell" aria-label="Environment chooser">
+      <section className="chooser-panel">
+        <header className="chooser-header">
+          <div className="rail-title">
+            <span className="eyebrow">Milena</span>
+            <strong>Environments</strong>
+            <small>Saved Kafka connection profiles</small>
+          </div>
+          <div className="chooser-actions">
+            <span className={`status-pill ${status.tone}`}>{status.message}</span>
+            <button
+              className="rail-toggle-button"
+              type="button"
+              aria-label="Refresh environments"
+              title="Refresh environments"
+              disabled={status.tone === "loading"}
+              onClick={onRefresh}
+            >
+              <RefreshCw aria-hidden="true" size={15} strokeWidth={1.9} />
+            </button>
+            <button
+              className="secondary compact"
+              type="button"
+              onClick={onAdd}
+            >
+              <Plus aria-hidden="true" size={14} strokeWidth={2} />
+              <span>Add</span>
+            </button>
+          </div>
+        </header>
+
+        <div className="chooser-grid">
+          <section className="environment-list" aria-label="Saved environments">
+            {environments.length === 0 ? (
+              <div className="environment-empty">
+                <strong>No saved environments</strong>
+                <span>Add a profile to make it available in the chooser.</span>
+              </div>
+            ) : (
+              environments.map((environment) => {
+                const selected = environment.name === onboarding?.selectedEnvironmentName;
+                const remembered =
+                  environment.name === onboarding?.lastSelectedEnvironmentName;
+                return (
+                  <button
+                    className={[
+                      "environment-row",
+                      selected ? "active" : "",
+                      remembered ? "remembered" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    type="button"
+                    aria-current={selected ? "true" : undefined}
+                    key={environment.name}
+                    onClick={() => onSelect(environment.name)}
+                  >
+                    <span className="environment-marker" />
+                    <span>
+                      <strong>{environment.name}</strong>
+                      <small>{environment.brokers.join(", ")}</small>
+                      {environment.username ? (
+                        <small>{environment.username}</small>
+                      ) : null}
+                    </span>
+                    <span className="status-pill">
+                      {authModeLabel(environment.authMode)}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </section>
+
+          <section className="environment-detail" aria-label="Environment details">
+            {form ? (
+              <EnvironmentForm
+                form={form}
+                onCancel={onCancel}
+                onFieldChange={onFieldChange}
+                onSave={onSave}
+                onTest={onTestForm}
+                saving={busy}
+              />
+            ) : deleteConfirmation ? (
+              <EnvironmentDeleteConfirmation
+                environmentName={deleteConfirmation.environmentName}
+                busy={busy}
+                onCancel={onCancelDelete}
+                onConfirm={onConfirmDelete}
+              />
+            ) : selectedEnvironment ? (
+              <EnvironmentSummary
+                environment={selectedEnvironment}
+                onEdit={onEdit}
+                onOpen={onOpen}
+                onRequestDelete={onRequestDelete}
+                onTest={onTestSelected}
+                busy={busy}
+              />
+            ) : (
+              <div className="environment-empty detail-empty">
+                <strong>Chooser ready</strong>
+                <span>Select an environment or add a new one.</span>
+              </div>
+            )}
+          </section>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function EnvironmentSummary({
+  environment,
+  busy,
+  onEdit,
+  onOpen,
+  onRequestDelete,
+  onTest,
+}: {
+  environment: OnboardingEnvironment;
+  busy: boolean;
+  onEdit: () => void;
+  onOpen: () => void;
+  onRequestDelete: () => void;
+  onTest: () => void;
+}) {
+  return (
+    <div className="environment-summary-panel">
+      <header>
+        <div className="rail-title">
+          <span className="eyebrow">Selected</span>
+          <strong>{environment.name}</strong>
+          <small>{authModeLabel(environment.authMode)}</small>
+        </div>
+        <button className="secondary compact" type="button" onClick={onEdit}>
+          <Edit3 aria-hidden="true" size={14} strokeWidth={2} />
+          <span>Edit</span>
+        </button>
+      </header>
+      <dl className="environment-facts">
+        <div>
+          <dt>Brokers</dt>
+          <dd>{environment.brokers.join(", ")}</dd>
+        </div>
+        <div>
+          <dt>Username</dt>
+          <dd>{environment.username || "none"}</dd>
+        </div>
+        <div>
+          <dt>Advanced properties</dt>
+          <dd>{environment.advancedPropertiesText || "none"}</dd>
+        </div>
+      </dl>
+      <div className="environment-placeholder-actions">
+        <button type="button" className="primary" onClick={onOpen} disabled={busy}>
+          Open
+        </button>
+        <button type="button" onClick={onTest} disabled={busy}>
+          Test connection
+        </button>
+        <button type="button" className="danger" onClick={onRequestDelete} disabled={busy}>
+          <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
+          <span>Delete</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function EnvironmentDeleteConfirmation({
+  environmentName,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  environmentName: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="environment-summary-panel environment-delete-confirmation">
+      <header>
+        <div className="rail-title">
+          <span className="eyebrow">Confirm delete</span>
+          <strong>{`Delete environment "${environmentName}"?`}</strong>
+          <small>Secrets and saved metadata will be removed.</small>
+        </div>
+      </header>
+      <div className="environment-delete-body">
+        <dl className="environment-facts">
+          <div>
+            <dt>Environment</dt>
+            <dd>{environmentName}</dd>
+          </div>
+        </dl>
+      </div>
+      <div className="environment-placeholder-actions">
+        <button type="button" onClick={onCancel} disabled={busy}>
+          Cancel delete
+        </button>
+        <button type="button" className="danger primary" onClick={onConfirm} disabled={busy}>
+          <Trash2 aria-hidden="true" size={14} strokeWidth={2} />
+          <span>{`Delete ${environmentName}`}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function EnvironmentForm({
+  form,
+  onCancel,
+  onFieldChange,
+  onSave,
+  onTest,
+  saving,
+}: {
+  form: NonNullable<OnboardingState["form"]>;
+  onCancel: () => void;
+  onFieldChange: <K extends keyof OnboardingFormValues>(
+    field: K,
+    value: OnboardingFormValues[K],
+  ) => void;
+  onSave: () => void;
+  onTest: () => void;
+  saving: boolean;
+}) {
+  const usesCredentials = isSaslAuthMode(form.values.authMode);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+
+  return (
+    <form
+      className="environment-form"
+      aria-label={`${form.mode === "add" ? "Add" : "Edit"} environment`}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave();
+      }}
+    >
+      <header>
+        <div className="rail-title">
+          <span className="eyebrow">{form.mode === "add" ? "Add" : "Edit"}</span>
+          <strong>{form.mode === "add" ? "New environment" : form.values.name}</strong>
+          <small>Save keeps you in the chooser.</small>
+        </div>
+        <div className="chooser-actions">
+          <button type="button" onClick={onTest} disabled={saving}>
+            Test connection
+          </button>
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="primary" type="submit" disabled={saving}>
+            <Save aria-hidden="true" size={14} strokeWidth={2} />
+            <span>Save</span>
+          </button>
+        </div>
+      </header>
+
+      <div className="environment-fields">
+        <FieldError error={form.errors.name}>
+          <label>
+            <span>Name</span>
+            <input
+              aria-label="Environment name"
+              type="text"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              value={form.values.name}
+              disabled={form.mode === "edit"}
+              onChange={(event) => onFieldChange("name", event.currentTarget.value)}
+            />
+          </label>
+        </FieldError>
+
+        <FieldError error={form.errors.brokersText}>
+          <label>
+            <span>Brokers</span>
+            <textarea
+              aria-label="Kafka brokers"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              value={form.values.brokersText}
+              onChange={(event) =>
+                onFieldChange("brokersText", event.currentTarget.value)
+              }
+            />
+          </label>
+        </FieldError>
+
+        <label>
+          <span>Auth mode</span>
+          <select
+            aria-label="Auth mode"
+            value={form.values.authMode}
+            onChange={(event) =>
+              onFieldChange("authMode", event.currentTarget.value as EnvironmentAuthMode)
+            }
+          >
+            <option value="plaintext">PLAINTEXT (no auth)</option>
+            <option value="saslSslPlain">SASL_SSL PLAIN</option>
+            <option value="saslSslScramSha512">SASL_SSL SCRAM-SHA-512</option>
+          </select>
+        </label>
+
+        {usesCredentials ? (
+          <div className="credential-grid">
+            <FieldError error={form.errors.username}>
+              <label>
+                <span>Username</span>
+                <input
+                  aria-label="Kafka username"
+                  type="text"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  value={form.values.username}
+                  onChange={(event) =>
+                    onFieldChange("username", event.currentTarget.value)
+                  }
+                />
+              </label>
+            </FieldError>
+            <FieldError error={form.errors.password}>
+              <label>
+                <span>Password</span>
+                <div className="password-field">
+                  <input
+                    aria-label="Kafka password"
+                    type={passwordVisible ? "text" : "password"}
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    value={form.values.password}
+                    placeholder={form.mode === "edit" ? "Leave blank to keep" : ""}
+                    onChange={(event) =>
+                      onFieldChange("password", event.currentTarget.value)
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="icon-button password-preview-toggle"
+                    aria-label={passwordVisible ? "Hide Kafka password" : "Show Kafka password"}
+                    title={passwordVisible ? "Hide password" : "Show password"}
+                    onClick={() => setPasswordVisible((visible) => !visible)}
+                  >
+                    {passwordVisible ? (
+                      <EyeOff aria-hidden="true" size={14} strokeWidth={2} />
+                    ) : (
+                      <Eye aria-hidden="true" size={14} strokeWidth={2} />
+                    )}
+                  </button>
+                </div>
+              </label>
+            </FieldError>
+          </div>
+        ) : null}
+
+        <label>
+          <span>Advanced properties</span>
+          <textarea
+            aria-label="Advanced Kafka properties"
+            className="advanced-properties"
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
+            value={form.values.advancedPropertiesText}
+            onChange={(event) =>
+              onFieldChange("advancedPropertiesText", event.currentTarget.value)
+            }
+          />
+        </label>
+      </div>
+      {form.testResult ? (
+        <div
+          className={`environment-test-result ${form.testResult.status}`}
+          role="status"
+        >
+          {form.testResult.message}
+        </div>
+      ) : null}
+    </form>
+  );
+}
+
+function FieldError({
+  children,
+  error,
+}: {
+  children: ReactNode;
+  error: string | undefined;
+}) {
+  return (
+    <div className={error ? "field has-error" : "field"}>
+      {children}
+      {error ? <small>{error}</small> : null}
+    </div>
+  );
+}
+
+export function WorkspaceShell({
+  activeRuntimeAuth = localDevRuntimeAuth,
+  autoLoadTopics = false,
+  initialTopics = null,
+  onChangeEnvironment,
+}: {
+  activeRuntimeAuth?: RuntimeAuthConfig;
+  autoLoadTopics?: boolean;
+  initialTopics?: KafkaTopicMetadata[] | null;
+  onChangeEnvironment?: (environmentName: string) => void;
+}) {
   const [appState, setAppState] = useState<AppState | null>(null);
   const [workspace, setWorkspace] = useState(createInitialWorkspaceState);
   const [topicRail, setTopicRail] = useState(() =>
-    createInitialTopicRailState(getTopicPinStore()),
+    initialTopics === null
+      ? createInitialTopicRailState(getTopicPinStore())
+      : markTopicLoadSucceeded(
+          createInitialTopicRailState(getTopicPinStore()),
+          environmentKey(activeRuntimeAuth),
+          initialTopics,
+        ),
   );
   const [messageRenderPreferences, setMessageRenderPreferences] = useState(() =>
     readMessageRenderPreferences(getMessageRenderPreferenceStore()),
@@ -153,8 +1119,7 @@ function App() {
     loadAppState()
       .then(setAppState)
       .catch((cause: unknown) => {
-        const message =
-          cause instanceof Error ? cause.message : "Tauri runtime unavailable";
+        const message = errorMessage(cause, "Tauri runtime unavailable");
         recordGlobalError("app", "Tauri runtime unavailable", message);
       });
   }, []);
@@ -245,12 +1210,19 @@ function App() {
         markTopicLoadSucceeded(current, key, topicList.topics),
       );
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Topic list refresh failed";
+      const message = errorMessage(cause, "Topic list refresh failed");
       setTopicRail((current) => markTopicLoadFailed(current, key, message));
       recordGlobalError("topics", "Topic list refresh failed", message);
     }
   }
+
+  useEffect(() => {
+    if (!autoLoadTopics) {
+      return;
+    }
+
+    void loadTopicList(true);
+  }, [autoLoadTopics, activeRuntimeAuth]);
 
   function refreshTopicList() {
     void loadTopicList(true);
@@ -337,8 +1309,7 @@ function App() {
     if (replacedSessionId && replacedPane) {
       void stopKafkaConsumerSession({ sessionId: replacedSessionId }).catch(
         (cause: unknown) => {
-          const message =
-            cause instanceof Error ? cause.message : "Kafka consumer cleanup failed";
+          const message = errorMessage(cause, "Kafka consumer cleanup failed");
           recordGlobalError(
             "consumer",
             "Consumer cleanup failed",
@@ -360,6 +1331,10 @@ function App() {
       onStopError: (message) =>
         recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
     });
+  }
+
+  function clearPaneMessages(paneId: number) {
+    updateWorkspace((current) => clearPaneActivity(current, paneId));
   }
 
   function closeWorkspacePane(paneId: number) {
@@ -459,6 +1434,31 @@ function App() {
     }));
   }
 
+  function changeActiveEnvironment() {
+    const currentWorkspace = workspaceRef.current;
+    const sessionIds = Array.from(
+      new Set(
+        currentWorkspace.panes.flatMap((pane) => {
+          nextPollingRun(pane.id);
+          const sessionId = getPanePollingSessionId(currentWorkspace, pane.id);
+          return sessionId ? [sessionId] : [];
+        }),
+      ),
+    );
+    const resetWorkspace = createInitialWorkspaceState();
+    workspaceRef.current = resetWorkspace;
+    setWorkspace(resetWorkspace);
+    setPublisherState(createInitialPublisherState());
+    setActivity(clearGlobalActivity());
+    setTopicMenu(null);
+
+    for (const sessionId of sessionIds) {
+      void stopKafkaConsumerSession({ sessionId }).catch(() => undefined);
+    }
+
+    onChangeEnvironment?.(activeRuntimeAuth.environment);
+  }
+
   return (
     <main
       className={[
@@ -490,15 +1490,32 @@ function App() {
             </div>
           </header>
           <section className="environment-summary">
-            <span>Cluster</span>
-            <button
-              className="refresh-button"
-              type="button"
-              disabled={topicRail.status === "loading"}
-              onClick={refreshTopicList}
-            >
-              Refresh
-            </button>
+            <div className="environment-summary-heading">
+              <span>Cluster</span>
+              <div className="environment-summary-actions">
+                {onChangeEnvironment ? (
+                  <button
+                    className="refresh-button secondary compact"
+                    type="button"
+                    aria-label="Change environment"
+                    title="Change environment"
+                    onClick={changeActiveEnvironment}
+                  >
+                    <ChevronDown aria-hidden="true" size={14} strokeWidth={2} />
+                    <span>Change</span>
+                  </button>
+                ) : null}
+                <button
+                  className="refresh-button secondary compact"
+                  type="button"
+                  disabled={topicRail.status === "loading"}
+                  onClick={refreshTopicList}
+                >
+                  <RefreshCw aria-hidden="true" size={14} strokeWidth={2} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
             <strong>{activeRuntimeAuth.brokers.join(", ")}</strong>
             <small>
               {topicRailStatus(topicRail.status, topicRail.topics.length)}
@@ -673,6 +1690,7 @@ function App() {
               onExpand={() => expandPane(pane.id)}
               onRestore={restorePane}
               onStop={() => stopPane(pane.id)}
+              onClearMessages={() => clearPaneMessages(pane.id)}
               onClose={() => closeWorkspacePane(pane.id)}
             />
           ))}
@@ -855,6 +1873,7 @@ type PaneProps = {
   onExpand: () => void;
   onRestore: () => void;
   onStop: () => void;
+  onClearMessages: () => void;
   onClose: () => void;
 };
 
@@ -877,6 +1896,7 @@ export function Pane({
   onExpand,
   onRestore,
   onStop,
+  onClearMessages,
   onClose,
 }: PaneProps) {
   const empty = isPaneEmpty(pane);
@@ -914,6 +1934,11 @@ export function Pane({
       }
       return next;
     });
+  }
+
+  function clearMessages() {
+    setExpandedRows(new Set());
+    onClearMessages();
   }
 
   return (
@@ -1055,6 +2080,17 @@ export function Pane({
                   </select>
                 </label>
               ) : null}
+              <button
+                className="secondary compact consumer-clear-button"
+                type="button"
+                aria-label={`Clear messages for pane ${pane.id}`}
+                title={`Clear messages for pane ${pane.id}`}
+                onClick={stopEvent(clearMessages)}
+                disabled={recordEvents.length === 0}
+              >
+                <Trash2 aria-hidden="true" size={13} strokeWidth={1.9} />
+                <span>Clear</span>
+              </button>
               <span className={`status-pill ${pane.status}`}>{compactStatus}</span>
             </div>
           </header>
@@ -1198,7 +2234,6 @@ function MessageStreamRow({
           {message.expanded ? "-" : "+"}
         </span>
         <span className="message-meta">{message.receiveTime}</span>
-        <span className="topic-label">{message.topic}</span>
         <span className="message-meta">
           p{message.partition} / {message.offset}
         </span>
@@ -1210,7 +2245,7 @@ function MessageStreamRow({
             <span className="message-marker">{message.payload.marker}</span>
           ) : null}
           <code>{message.payload.preview}</code>
-          {message.payload.truncated ? (
+          {message.payload.previewTruncated ? (
             <span className="message-marker">truncated</span>
           ) : null}
         </span>
@@ -1219,7 +2254,7 @@ function MessageStreamRow({
       {message.expanded ? (
         <div className="message-expanded">
           <pre>{message.payload.content}</pre>
-          {message.payload.truncated ? (
+          {message.payload.contentTruncated ? (
             <span className="message-marker">payload truncated</span>
           ) : null}
           <section className="message-headers" aria-label="Kafka headers">
@@ -1411,6 +2446,112 @@ function compactPaneStatusLabel(pane: WorkspacePane): string {
   }
 
   return pane.status;
+}
+
+function toOnboardingEnvironment(
+  environment: SavedEnvironment,
+): OnboardingEnvironment {
+  return {
+    name: environment.name,
+    brokers: environment.brokers,
+    authMode: environment.authMode,
+    username: environment.username ?? "",
+    advancedPropertiesText: environment.advancedProperties,
+  };
+}
+
+function onboardingEnvironmentSignature(environment: OnboardingEnvironment): string {
+  return JSON.stringify({
+    name: environment.name,
+    brokers: environment.brokers,
+    authMode: environment.authMode,
+    username: environment.username,
+    advancedPropertiesText: environment.advancedPropertiesText,
+  });
+}
+
+function connectionSuccessMessage(topicCount: number): string {
+  return `Connection OK: ${pluralizeTopics(topicCount)}`;
+}
+
+function pluralizeTopics(topicCount: number): string {
+  return `${topicCount} ${topicCount === 1 ? "topic" : "topics"}`;
+}
+
+function onboardingFormSignature(form: NonNullable<OnboardingState["form"]>): string {
+  return JSON.stringify({
+    mode: form.mode,
+    originalName: form.originalName,
+    originalAuthMode: form.originalAuthMode,
+    values: form.values,
+  });
+}
+
+function authModeLabel(authMode: EnvironmentAuthMode): string {
+  if (authMode === "saslSslPlain") {
+    return "SASL_SSL PLAIN";
+  }
+  return authMode === "saslSslScramSha512" ? "SASL_SSL SCRAM" : "PLAINTEXT";
+}
+
+function isSaslAuthMode(authMode: EnvironmentAuthMode): boolean {
+  return authMode === "saslSslPlain" || authMode === "saslSslScramSha512";
+}
+
+function errorMessage(cause: unknown, fallback: string): string {
+  if (cause instanceof Error) {
+    return cause.message;
+  }
+  if (isMilenaCommandError(cause)) {
+    return cause.message;
+  }
+  return fallback;
+}
+
+function isMilenaCommandError(cause: unknown): cause is MilenaCommandError {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    typeof cause.message === "string"
+  );
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return (
+    target.isContentEditable ||
+    target.tagName === "INPUT" ||
+    target.tagName === "SELECT" ||
+    target.tagName === "TEXTAREA"
+  );
+}
+
+function readLastSelectedEnvironmentName(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return window.localStorage.getItem(LAST_SELECTED_ENVIRONMENT_KEY);
+}
+
+function rememberLastSelectedEnvironment(environmentName: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(LAST_SELECTED_ENVIRONMENT_KEY, environmentName);
+}
+
+function forgetLastSelectedEnvironment() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.removeItem(LAST_SELECTED_ENVIRONMENT_KEY);
 }
 
 function getTopicPinStore(): TopicPinStore | undefined {

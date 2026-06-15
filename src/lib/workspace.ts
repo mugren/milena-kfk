@@ -336,6 +336,16 @@ export function appendPaneActivity(
   });
 }
 
+export function clearPaneActivity(
+  workspace: WorkspaceState,
+  paneId: number,
+): WorkspaceState {
+  return updatePane(workspace, paneId, (pane) => ({
+    ...pane,
+    activity: [],
+  }));
+}
+
 export function markPaneReady(
   workspace: WorkspaceState,
   paneId: number,

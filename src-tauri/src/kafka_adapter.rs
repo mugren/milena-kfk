@@ -11,7 +11,7 @@ use std::{
 use rdkafka::{
     admin::{AdminClient, AdminOptions},
     client::DefaultClientContext,
-    config::ClientConfig,
+    config::{ClientConfig, RDKafkaLogLevel},
     consumer::{Consumer, StreamConsumer},
     message::Message,
     producer::{FutureProducer, FutureRecord},
@@ -29,6 +29,7 @@ use crate::{
 };
 
 const GROUP_ID_PREFIX: &str = "milena-poll";
+const METADATA_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub trait KafkaAdapter {
@@ -53,7 +54,7 @@ pub trait KafkaAdapter {
     ) -> CommandResult<StopKafkaConsumerSessionResponse>;
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct NativeKafkaAdapter {
     sessions: Arc<Mutex<BTreeMap<String, NativeConsumerSession>>>,
 }
@@ -67,7 +68,7 @@ impl KafkaAdapter for NativeKafkaAdapter {
             ))
         })?;
         let metadata = consumer
-            .fetch_metadata(None, Duration::from_secs(10))
+            .fetch_metadata(None, METADATA_FETCH_TIMEOUT)
             .map_err(|error| MilenaCommandError::kafka_operation_failed(error))?;
 
         Ok(metadata
@@ -227,6 +228,7 @@ impl NativeClientConfig {
         for (key, value) in &self.entries {
             config.set(key, value);
         }
+        config.set_log_level(RDKafkaLogLevel::Emerg);
         config
     }
 }
@@ -246,9 +248,25 @@ pub fn build_native_client_config(
     }
 
     let security_protocol = required_property(auth, "security.protocol")?;
+    if security_protocol.eq_ignore_ascii_case("PLAINTEXT") {
+        let mut entries = auth.properties.clone();
+        entries.insert("bootstrap.servers".to_string(), brokers.join(","));
+        entries.insert("security.protocol".to_string(), "PLAINTEXT".to_string());
+        entries.remove("sasl.mechanism");
+        entries.remove("sasl.username");
+        entries.remove("sasl.password");
+        entries.remove("sasl.jaas.config");
+        apply_native_client_defaults(&mut entries);
+        if let Some(group_id) = group_id {
+            entries.insert("group.id".to_string(), group_id.to_string());
+        }
+
+        return Ok(NativeClientConfig { entries });
+    }
+
     if !security_protocol.eq_ignore_ascii_case("SASL_SSL") {
         return Err(MilenaCommandError::kafka_auth_unsupported(format!(
-            "unsupported Kafka security.protocol '{security_protocol}'; MVP supports SASL_SSL"
+            "unsupported Kafka security.protocol '{security_protocol}'; MVP supports PLAINTEXT and SASL_SSL"
         )));
     }
 
@@ -263,11 +281,26 @@ pub fn build_native_client_config(
     entries.insert("sasl.password".to_string(), credentials.password);
     entries.remove("sasl.jaas.config");
     resolve_ssl_ca_location(&mut entries);
+    apply_native_client_defaults(&mut entries);
     if let Some(group_id) = group_id {
         entries.insert("group.id".to_string(), group_id.to_string());
     }
 
     Ok(NativeClientConfig { entries })
+}
+
+fn apply_native_client_defaults(entries: &mut BTreeMap<String, String>) {
+    for (key, value) in [
+        ("log.connection.close", "false"),
+        ("socket.timeout.ms", "3000"),
+        ("socket.connection.setup.timeout.ms", "3000"),
+        ("reconnect.backoff.ms", "500"),
+        ("reconnect.backoff.max.ms", "1000"),
+    ] {
+        entries
+            .entry(key.to_string())
+            .or_insert_with(|| value.to_string());
+    }
 }
 
 pub fn next_consumer_group_id(environment: &str) -> String {

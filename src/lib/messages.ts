@@ -31,6 +31,8 @@ export type RenderedKafkaPayload = {
   content: string;
   invalidJson: boolean;
   truncated: boolean;
+  previewTruncated: boolean;
+  contentTruncated: boolean;
   marker: string | null;
 };
 
@@ -92,30 +94,36 @@ export function renderPayload(
   },
 ): RenderedKafkaPayload {
   if (mode === "raw") {
+    const preview = capText(payload, maxPreviewChars);
+    const content = capText(payload, maxExpandedChars);
+
     return {
       mode,
       format: "raw",
-      preview: capText(payload, maxPreviewChars).text,
-      content: capText(payload, maxExpandedChars).text,
+      preview: preview.text,
+      content: content.text,
       invalidJson: false,
-      truncated:
-        capText(payload, maxPreviewChars).truncated ||
-        capText(payload, maxExpandedChars).truncated,
+      truncated: preview.truncated || content.truncated,
+      previewTruncated: preview.truncated,
+      contentTruncated: content.truncated,
       marker: null,
     };
   }
 
   const parsed = parseJsonPayload(payload);
   if (!parsed.ok) {
+    const preview = capText(payload, maxPreviewChars);
+    const content = capText(payload, maxExpandedChars);
+
     return {
       mode,
       format: "raw",
-      preview: capText(payload, maxPreviewChars).text,
-      content: capText(payload, maxExpandedChars).text,
+      preview: preview.text,
+      content: content.text,
       invalidJson: true,
-      truncated:
-        capText(payload, maxPreviewChars).truncated ||
-        capText(payload, maxExpandedChars).truncated,
+      truncated: preview.truncated || content.truncated,
+      previewTruncated: preview.truncated,
+      contentTruncated: content.truncated,
       marker: "invalid JSON",
     };
   }
@@ -132,6 +140,8 @@ export function renderPayload(
     content: content.text,
     invalidJson: false,
     truncated: preview.truncated || content.truncated,
+    previewTruncated: preview.truncated,
+    contentTruncated: content.truncated,
     marker: null,
   };
 }
@@ -197,6 +207,17 @@ export function setTopicMessageRenderMode(
       [topic]: mode,
     },
   };
+
+  writeMessageRenderPreferences(nextPreferences, store);
+  return nextPreferences;
+}
+
+export function removeMessageRenderPreferencesForEnvironment(
+  environment: string,
+  store?: MessageRenderPreferenceStore,
+): MessageRenderPreferences {
+  const preferences = readMessageRenderPreferences(store);
+  const { [environment]: _deletedEnvironment, ...nextPreferences } = preferences;
 
   writeMessageRenderPreferences(nextPreferences, store);
   return nextPreferences;

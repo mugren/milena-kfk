@@ -2,101 +2,39 @@
  * @vitest-environment jsdom
  */
 import "@testing-library/jest-dom/vitest";
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { Pane, RightRail } from "./App";
-import type {
-  AppState,
-  KafkaConsumerSession,
-  KafkaRecordEvent,
-  KafkaTopicMetadata,
-  MilenaBoundaryEvent,
-  PublishKafkaRecordResponse,
-  StopKafkaConsumerSessionResponse,
-} from "./lib/tauri";
+import {
+  cleanupRendererHarness,
+  consumerError,
+  consumerSession,
+  emit,
+  kafkaRecord,
+  loadedTopics,
+  messagePreferencesStorageKey,
+  messageRowButton,
+  openTopic,
+  pane,
+  Pane,
+  queryTopicSelect,
+  registerSessionEventHandler,
+  renderApp,
+  resetRendererHarness,
+  RightRail,
+  WorkspaceShell,
+  tauri,
+  topicOpenActions,
+  topicPinStorageKey,
+  topicRow,
+  topics,
+  topicSelect,
+} from "./App.renderer.test-utils";
+import type { KafkaConsumerSession } from "./lib/tauri";
 import type { WorkspacePane } from "./lib/workspace";
 
-const tauri = vi.hoisted(() => ({
-  loadAppState: vi.fn(),
-  listKafkaTopics: vi.fn(),
-  startKafkaConsumerSession: vi.fn(),
-  stopKafkaConsumerSession: vi.fn(),
-  publishKafkaRecord: vi.fn(),
-}));
-
-vi.mock("./lib/tauri", async () => {
-  const actual = await vi.importActual<typeof import("./lib/tauri")>(
-    "./lib/tauri",
-  );
-
-  return {
-    ...actual,
-    loadAppState: tauri.loadAppState,
-    listKafkaTopics: tauri.listKafkaTopics,
-    startKafkaConsumerSession: tauri.startKafkaConsumerSession,
-    stopKafkaConsumerSession: tauri.stopKafkaConsumerSession,
-    publishKafkaRecord: tauri.publishKafkaRecord,
-  };
-});
-
-const appState: AppState = {
-  appName: "Milena",
-  version: "0.1.0",
-  platform: "macos-dev",
-  capabilities: ["command-boundary", "event-channel", "macos-dev-build"],
-};
-
-const topics: KafkaTopicMetadata[] = [
-  { name: "orders.created", partitionCount: 12 },
-  { name: "milena.issue14.cleanup", partitionCount: 4 },
-  { name: "milena.issue14.interop", partitionCount: 3 },
-  { name: "payments.authorized", partitionCount: 8 },
-  { name: "inventory.adjusted", partitionCount: 6 },
-];
-
-const topicPinStorageKey = "milena.topicPins.v1";
-const messagePreferencesStorageKey = "milena.messageRenderPreferences.v1";
-
-let emittedEvents: Record<string, (event: MilenaBoundaryEvent) => void>;
-let nextSession: number;
-
-beforeEach(() => {
-  emittedEvents = {};
-  nextSession = 0;
-  installLocalStorage();
-  vi.resetAllMocks();
-
-  tauri.loadAppState.mockResolvedValue(appState);
-  tauri.listKafkaTopics.mockResolvedValue({ topics });
-  tauri.startKafkaConsumerSession.mockImplementation(async (request, onEvent) => {
-    nextSession += 1;
-    const session = consumerSession(
-      `session-${nextSession}`,
-      `group-${nextSession}`,
-      request.topics[0],
-    );
-    emittedEvents[session.sessionId] = onEvent;
-    return session;
-  });
-  tauri.stopKafkaConsumerSession.mockImplementation(async ({ sessionId }) =>
-    stoppedSession(sessionId, sessionId.replace("session", "group")),
-  );
-  tauri.publishKafkaRecord.mockResolvedValue(producerAck());
-});
-
-afterEach(() => {
-  cleanup();
-  window.localStorage.clear();
-});
+beforeEach(resetRendererHarness);
+afterEach(cleanupRendererHarness);
 
 describe("App renderer flow harness", () => {
   it("renders the shell without opening a Kafka connection", async () => {
@@ -125,7 +63,27 @@ describe("App renderer flow harness", () => {
     const { readFileSync } = await import("node:fs");
     const appCss = readFileSync("src/App.css", "utf8");
     expect(appCss).toContain("font-family: -apple-system");
+    expect(appCss).toContain("--topics-rail-width: clamp(320px, 22vw, 360px)");
+    expect(appCss).toContain("var(--topics-rail-width)");
     expect(appCss).not.toContain("Inter");
+  });
+
+  it("shows change environment only when the workspace can return to the chooser", async () => {
+    const onChangeEnvironment = vi.fn();
+    renderApp();
+
+    expect(
+      screen.queryByRole("button", { name: "Change environment" }),
+    ).not.toBeInTheDocument();
+
+    cleanupRendererHarness();
+    resetRendererHarness();
+    const user = userEvent.setup();
+    render(<WorkspaceShell onChangeEnvironment={onChangeEnvironment} />);
+
+    await user.click(screen.getByRole("button", { name: "Change environment" }));
+
+    expect(onChangeEnvironment).toHaveBeenCalledWith("local-dev");
   });
 
   it("keeps hideable side columns with icon controls without losing pane state", async () => {
@@ -468,6 +426,25 @@ describe("App renderer flow harness", () => {
       "orders.created p0 / 42",
     );
 
+    await user.click(
+      within(pane("1")).getByRole("button", {
+        name: "Clear messages for pane 1",
+      }),
+    );
+    expect(pane("1")).not.toHaveTextContent('{"offset":42}');
+    expect(pane("1")).toHaveTextContent("session-1");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("kafkaRecord");
+    expect(tauri.stopKafkaConsumerSession).not.toHaveBeenCalled();
+
+    emit(
+      "session-1",
+      kafkaRecord("session-1", {
+        offset: 43,
+        payload: "{\"offset\":43}",
+      }),
+    );
+    expect(await screen.findByText('{"offset":43}')).toBeVisible();
+
     await user.click(within(pane("1")).getByRole("button", { name: "Stop" }));
 
     await waitFor(() =>
@@ -730,7 +707,7 @@ describe("App renderer flow harness", () => {
               "group-loading",
               request.topics[0],
             );
-            emittedEvents[started.sessionId] = onEvent;
+            registerSessionEventHandler(started.sessionId, onEvent);
             resolve(started);
           };
         }),
@@ -908,7 +885,9 @@ describe("App renderer flow harness", () => {
 
     expect(await screen.findByText("invalid JSON")).toBeVisible();
     expect(screen.getByText("{\"id\":")).toBeVisible();
-    expect(messageRowButton("orders.created")).toHaveClass("has-key");
+    const consumer = within(pane("1")).getByLabelText("Consumer for pane 1");
+    expect(within(consumer).queryByText("orders.created")).not.toBeInTheDocument();
+    expect(messageRowButton("{\"id\":")).toHaveClass("has-key");
 
     await user.selectOptions(
       screen.getByLabelText("Render mode for orders.created"),
@@ -919,8 +898,8 @@ describe("App renderer flow harness", () => {
     );
     expect(screen.queryByText("invalid JSON")).not.toBeInTheDocument();
 
-    await user.click(messageRowButton("orders.created"));
-    expect(messageRowButton("orders.created")).toHaveAttribute(
+    await user.click(messageRowButton("{\"id\":"));
+    expect(messageRowButton("{\"id\":")).toHaveAttribute(
       "aria-expanded",
       "true",
     );
@@ -954,9 +933,38 @@ describe("App renderer flow harness", () => {
     // @ts-ignore Vitest runs this assertion in Node; the renderer tsconfig has no Node types.
     const { readFileSync } = await import("node:fs");
     const appCss = readFileSync("src/App.css", "utf8");
-    expect(appCss).toMatch(/\.message-row-summary\.no-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(180px,\s*1fr\) minmax\(58px,\s*auto\) minmax\(0,\s*2fr\);/s);
-    expect(appCss).toMatch(/\.message-row-summary\.has-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(160px,\s*0\.9fr\) minmax\(58px,\s*auto\) minmax\(70px,\s*0\.45fr\) minmax\(0,\s*1\.65fr\);/s);
+    expect(appCss).toMatch(/\.message-row-summary\.no-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(58px,\s*auto\) minmax\(0,\s*1fr\);/s);
+    expect(appCss).toMatch(/\.message-row-summary\.has-key\s*{[^}]*grid-template-columns:\s*18px minmax\(66px,\s*auto\) minmax\(58px,\s*auto\) minmax\(70px,\s*0\.35fr\) minmax\(0,\s*1fr\);/s);
     expect(appCss).toMatch(/\.message-preview code\s*{[^}]*min-width:\s*0;[^}]*flex:\s*1 1 auto;/s);
+  });
+
+  it("does not label expanded records as truncated when only the summary preview is shortened", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-1");
+
+    emit("session-1", kafkaRecord("session-1", {
+      offset: 40,
+      payload: JSON.stringify({
+        mgId: "GAMEPLAN",
+        instanceId: 30013,
+        strategyName: "manual_mid_yes_no",
+        requestId: 1781305950813,
+        status: "config_applied",
+        config:
+          "{\"mojoId\":\"KXBTCD-26JUN1517-T66499.99\",\"qty_yes\":10,\"qty_no\":15,\"mid\":25,\"vig\":1,\"widen_to_market\":false,\"max_vig\":1,\"limits\":{\"max_loss\":1000}}",
+      }),
+    }));
+
+    const row = messageRowButton("GAMEPLAN");
+    expect(within(row).getByText("truncated")).toBeVisible();
+
+    await user.click(row);
+
+    expect(screen.getByText(/qty_yes/)).toBeVisible();
+    expect(screen.queryByText("payload truncated")).not.toBeInTheDocument();
   });
 
   it("opens and closes the topic open menu and routes actions to panes", async () => {
@@ -1046,12 +1054,6 @@ describe("App renderer flow harness", () => {
   });
 });
 
-function renderApp() {
-  const user = userEvent.setup();
-  render(<App />);
-  return { user };
-}
-
 function paneRenderProps({
   pane,
   active = true,
@@ -1097,6 +1099,7 @@ function paneRenderProps({
     onExpand,
     onRestore,
     onStop,
+    onClearMessages: vi.fn(),
     onClose,
   };
 }
@@ -1116,178 +1119,4 @@ function paneState(status: WorkspacePane["status"]): WorkspacePane {
     error: status === "error" ? "broker heartbeat failed" : null,
     tone: status === "error" ? "error" : "normal",
   };
-}
-
-async function loadedTopics() {
-  if (!queryTopicSelect("orders.created")) {
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  }
-
-  await waitFor(() => expect(topicSelect("orders.created")).toBeVisible());
-}
-
-function topicSelect(topic: string): HTMLElement {
-  const button = queryTopicSelect(topic);
-  if (!button) {
-    throw new Error(`Unable to find topic select button for ${topic}`);
-  }
-
-  return button;
-}
-
-function queryTopicSelect(topic: string): HTMLElement | null {
-  return (
-    screen
-      .queryAllByRole("button")
-      .find(
-        (button) =>
-          button.classList.contains("topic-select") &&
-          button.textContent?.includes(topic),
-      ) ?? null
-  );
-}
-
-function topicRow(topic: string): HTMLElement {
-  const row = topicSelect(topic).closest(".topic");
-  if (!row) {
-    throw new Error(`Unable to find topic row for ${topic}`);
-  }
-
-  return row as HTMLElement;
-}
-
-async function openTopic(
-  user: ReturnType<typeof userEvent.setup>,
-  topic: string,
-  action = "Open",
-) {
-  await user.click(topicOpenActions(topic));
-  await user.click(
-    within(await screen.findByRole("menu")).getByRole("menuitem", {
-      name: action,
-    }),
-  );
-}
-
-function topicOpenActions(topic: string): HTMLElement {
-  return screen.getByRole("button", { name: `Open actions for ${topic}` });
-}
-
-function pane(id: string): HTMLElement {
-  return screen.getByLabelText(`Pane ${id}`);
-}
-
-function messageRowButton(topic: string): HTMLElement {
-  const button = screen
-    .getAllByRole("button", { name: new RegExp(escapeRegExp(topic), "i") })
-    .find((candidate) => candidate.hasAttribute("aria-expanded"));
-  if (!button) {
-    throw new Error(`Unable to find message row for ${topic}`);
-  }
-
-  return button;
-}
-
-function emit(sessionId: string, event: MilenaBoundaryEvent) {
-  act(() => {
-    emittedEvents[sessionId](event);
-  });
-}
-
-function consumerSession(
-  sessionId: string,
-  groupId: string,
-  topic: string,
-): KafkaConsumerSession {
-  return {
-    sessionId,
-    groupId,
-    topics: [topic],
-    status: "started",
-  };
-}
-
-function stoppedSession(
-  sessionId: string,
-  groupId: string,
-): StopKafkaConsumerSessionResponse {
-  return {
-    sessionId,
-    groupId,
-    status: "stopped",
-    cleanup: {
-      groupId,
-      attempted: true,
-      succeeded: true,
-      error: null,
-    },
-  };
-}
-
-function producerAck(): PublishKafkaRecordResponse {
-  return {
-    topic: "orders.created",
-    partition: 2,
-    offset: 42,
-    status: "delivered",
-  };
-}
-
-function kafkaRecord(
-  sessionId: string,
-  overrides: Partial<KafkaRecordEvent> = {},
-): MilenaBoundaryEvent {
-  return {
-    event: "kafkaRecord",
-    data: {
-      record: {
-        sessionId,
-        topic: "orders.created",
-        partition: 0,
-        offset: 1,
-        key: null,
-        payload: "{\"offset\":1}",
-        headers: [],
-        receivedAt: "2026-06-12T12:00:00.000Z",
-        ...overrides,
-      },
-    },
-  };
-}
-
-function consumerError(sessionId: string, message: string): MilenaBoundaryEvent {
-  return {
-    event: "kafkaConsumerError",
-    data: {
-      sessionId,
-      message,
-    },
-  };
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function installLocalStorage() {
-  const values = new Map<string, string>();
-  const storage: Storage = {
-    get length() {
-      return values.size;
-    },
-    clear: () => values.clear(),
-    getItem: (key) => values.get(key) ?? null,
-    key: (index) => Array.from(values.keys())[index] ?? null,
-    removeItem: (key) => {
-      values.delete(key);
-    },
-    setItem: (key, value) => {
-      values.set(key, value);
-    },
-  };
-
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    value: storage,
-  });
 }

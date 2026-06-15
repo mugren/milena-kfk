@@ -3,6 +3,7 @@ import {
   MESSAGE_RENDER_PREFERENCES_KEY,
   readMessageRenderPreferences,
   renderKafkaRecord,
+  removeMessageRenderPreferencesForEnvironment,
   setTopicMessageRenderMode,
   stampKafkaRecordReceivedAt,
   topicMessageRenderMode,
@@ -69,6 +70,33 @@ describe("message rendering", () => {
     );
     expect(store.getItem(MESSAGE_RENDER_PREFERENCES_KEY)).toContain(
       "orders.created",
+    );
+  });
+
+  it("removes stored render preferences for a deleted environment", () => {
+    const store = memoryStore({
+      [MESSAGE_RENDER_PREFERENCES_KEY]: JSON.stringify({
+        local: {
+          "orders.created": "raw",
+        },
+        staging: {
+          "payments.authorized": "json",
+        },
+      }),
+    });
+
+    const remaining = removeMessageRenderPreferencesForEnvironment(
+      "local",
+      store,
+    );
+
+    expect(remaining).toEqual({
+      staging: {
+        "payments.authorized": "json",
+      },
+    });
+    expect(store.getItem(MESSAGE_RENDER_PREFERENCES_KEY)).toBe(
+      "{\"staging\":{\"payments.authorized\":\"json\"}}",
     );
   });
 
@@ -151,6 +179,24 @@ describe("message rendering", () => {
 
     expect(rendered.payload.preview).toBe("{\"value\":\"ab");
     expect(rendered.payload.content.length).toBeLessThanOrEqual(18);
+    expect(rendered.payload.truncated).toBe(true);
+  });
+
+  it("tracks preview truncation separately from expanded payload truncation", () => {
+    const rendered = renderKafkaRecord(
+      record({
+        payload: JSON.stringify({
+          mgId: "GAMEPLAN",
+          instanceId: 30013,
+          strategyName: "manual_mid_yes_no",
+          status: "config_applied",
+        }),
+      }),
+      { maxPreviewChars: 32, maxExpandedChars: 800 },
+    );
+
+    expect(rendered.payload.previewTruncated).toBe(true);
+    expect(rendered.payload.contentTruncated).toBe(false);
     expect(rendered.payload.truncated).toBe(true);
   });
 

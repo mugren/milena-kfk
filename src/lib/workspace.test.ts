@@ -3,6 +3,7 @@ import {
   appendPaneActivity,
   assignTopicToPane,
   canStartPaneSession,
+  clearPaneActivity,
   closePane,
   createInitialWorkspaceState,
   expandPane,
@@ -517,6 +518,47 @@ describe("workspace state", () => {
       mode: "poll",
       status: "loading",
       session: null,
+      activity: [],
+      error: null,
+      tone: "normal",
+    });
+  });
+
+  it("clears pane activity without stopping the active poll session", () => {
+    const active = appendPaneActivity(
+      markPanePollingStarted(
+        markPanePollingStarting(
+          assignedWorkspace("orders.created"),
+          1,
+          "orders.created",
+        ),
+        1,
+        consumerSession("session-1", "group-1", "orders.created"),
+      ),
+      1,
+      {
+        event: "kafkaRecord",
+        data: {
+          record: {
+            sessionId: "session-1",
+            topic: "orders.created",
+            partition: 0,
+            offset: 4,
+            key: null,
+            payload: "{\"offset\":4}",
+          },
+        },
+      },
+    );
+
+    const cleared = clearPaneActivity(active, 1);
+
+    expect(cleared.panes[0]).toMatchObject({
+      topic: "orders.created",
+      consumerGroup: "group-1",
+      mode: "poll",
+      status: "ready",
+      session: consumerSession("session-1", "group-1", "orders.created"),
       activity: [],
       error: null,
       tone: "normal",

@@ -19,6 +19,59 @@ use milena_lib::{
 };
 
 #[test]
+fn native_config_maps_plaintext_auth_into_librdkafka_entries() {
+    let mut runtime_auth = auth("PLAIN");
+    runtime_auth.properties.clear();
+    runtime_auth
+        .properties
+        .insert("security.protocol".to_string(), "PLAINTEXT".to_string());
+    runtime_auth
+        .properties
+        .insert("client.id".to_string(), "milena-dev".to_string());
+    runtime_auth
+        .properties
+        .insert("sasl.username".to_string(), "ignored-user".to_string());
+    runtime_auth
+        .properties
+        .insert("sasl.password".to_string(), "ignored-pass".to_string());
+    runtime_auth
+        .properties
+        .insert("sasl.jaas.config".to_string(), "ignored".to_string());
+
+    let native = build_native_client_config(&runtime_auth, Some("milena-poll-dev-1"))
+        .expect("plaintext auth should map");
+
+    assert_eq!(
+        native.entries().get("bootstrap.servers"),
+        Some(&"kafka-a:9092,kafka-b:9092".to_string())
+    );
+    assert_eq!(
+        native.entries().get("security.protocol"),
+        Some(&"PLAINTEXT".to_string())
+    );
+    assert_eq!(
+        native.entries().get("client.id"),
+        Some(&"milena-dev".to_string())
+    );
+    assert_eq!(
+        native.entries().get("group.id"),
+        Some(&"milena-poll-dev-1".to_string())
+    );
+    assert!(!native.entries().contains_key("sasl.mechanism"));
+    assert!(!native.entries().contains_key("sasl.username"));
+    assert!(!native.entries().contains_key("sasl.password"));
+    assert!(!native.entries().contains_key("sasl.jaas.config"));
+    assert_eq!(
+        native.entries().get("log.connection.close"),
+        Some(&"false".to_string())
+    );
+    assert_eq!(
+        native.entries().get("socket.timeout.ms"),
+        Some(&"3000".to_string())
+    );
+}
+
+#[test]
 fn native_config_maps_plain_sasl_ssl_auth_into_librdkafka_entries() {
     let mut runtime_auth = auth("PLAIN");
     runtime_auth.brokers = vec![
@@ -61,6 +114,81 @@ fn native_config_maps_plain_sasl_ssl_auth_into_librdkafka_entries() {
         native.entries().get("ssl.ca.location"),
         Some(&"/tmp/ca.pem".to_string())
     );
+    assert_eq!(
+        native.entries().get("socket.connection.setup.timeout.ms"),
+        Some(&"3000".to_string())
+    );
+    assert!(!native.entries().contains_key("sasl.jaas.config"));
+}
+
+#[test]
+fn native_config_preserves_user_timeout_overrides_while_adding_low_noise_defaults() {
+    let mut runtime_auth = auth("PLAIN");
+    runtime_auth
+        .properties
+        .insert("request.timeout.ms".to_string(), "1000".to_string());
+    runtime_auth
+        .properties
+        .insert("socket.timeout.ms".to_string(), "1000".to_string());
+
+    let native = build_native_client_config(&runtime_auth, None)
+        .expect("auth should map with user timeouts");
+
+    assert_eq!(
+        native.entries().get("request.timeout.ms"),
+        Some(&"1000".to_string())
+    );
+    assert_eq!(
+        native.entries().get("socket.timeout.ms"),
+        Some(&"1000".to_string())
+    );
+    assert_eq!(
+        native.entries().get("log.connection.close"),
+        Some(&"false".to_string())
+    );
+    assert_eq!(
+        native.entries().get("reconnect.backoff.max.ms"),
+        Some(&"1000".to_string())
+    );
+}
+
+#[test]
+fn native_config_maps_scram_sha_512_direct_credentials_into_librdkafka_entries() {
+    let mut runtime_auth = auth("SCRAM-SHA-512");
+    runtime_auth.properties.remove("sasl.jaas.config");
+    runtime_auth
+        .properties
+        .insert("sasl.username".to_string(), "scram-user".to_string());
+    runtime_auth
+        .properties
+        .insert("sasl.password".to_string(), "scram-pass".to_string());
+    runtime_auth
+        .properties
+        .insert("client.id".to_string(), "milena-scram".to_string());
+
+    let native = build_native_client_config(&runtime_auth, None)
+        .expect("SCRAM-SHA-512 direct credentials should map");
+
+    assert_eq!(
+        native.entries().get("security.protocol"),
+        Some(&"SASL_SSL".to_string())
+    );
+    assert_eq!(
+        native.entries().get("sasl.mechanism"),
+        Some(&"SCRAM-SHA-512".to_string())
+    );
+    assert_eq!(
+        native.entries().get("sasl.username"),
+        Some(&"scram-user".to_string())
+    );
+    assert_eq!(
+        native.entries().get("sasl.password"),
+        Some(&"scram-pass".to_string())
+    );
+    assert_eq!(
+        native.entries().get("client.id"),
+        Some(&"milena-scram".to_string())
+    );
     assert!(!native.entries().contains_key("sasl.jaas.config"));
 }
 
@@ -72,8 +200,8 @@ fn native_config_resolves_relative_ssl_ca_location_before_librdkafka_uses_it() {
         "tests/fixtures/kafka/order_created.json".to_string(),
     );
 
-    let native = build_native_client_config(&runtime_auth, None)
-        .expect("relative CA locations should map");
+    let native =
+        build_native_client_config(&runtime_auth, None).expect("relative CA locations should map");
     let ca_location = native
         .entries()
         .get("ssl.ca.location")
@@ -128,6 +256,16 @@ fn native_config_accepts_direct_credentials_over_jaas_credentials() {
 
 #[test]
 fn native_config_rejects_missing_or_unsupported_auth_material() {
+    let mut missing_brokers = auth("SCRAM-SHA-512");
+    missing_brokers.brokers = vec![" ".to_string(), "".to_string()];
+    let error = build_native_client_config(&missing_brokers, None)
+        .expect_err("missing brokers should fail before auth mapping");
+    assert_eq!(
+        error.code,
+        MilenaCommandErrorCode::EnvironmentBrokersRequired
+    );
+    assert!(error.message.contains("broker"));
+
     let mut missing_protocol = auth("PLAIN");
     missing_protocol.properties.remove("security.protocol");
     let error = build_native_client_config(&missing_protocol, None)
@@ -138,11 +276,11 @@ fn native_config_rejects_missing_or_unsupported_auth_material() {
     let mut unsupported = auth("PLAIN");
     unsupported
         .properties
-        .insert("security.protocol".to_string(), "PLAINTEXT".to_string());
+        .insert("security.protocol".to_string(), "SSL".to_string());
     let error = build_native_client_config(&unsupported, None)
         .expect_err("unsupported protocols should fail");
     assert_eq!(error.code, MilenaCommandErrorCode::KafkaAuthUnsupported);
-    assert!(error.message.contains("SASL_SSL"));
+    assert!(error.message.contains("PLAINTEXT and SASL_SSL"));
 
     let mut unsupported_mechanism = auth("GSSAPI");
     let error = build_native_client_config(&unsupported_mechanism, None)
