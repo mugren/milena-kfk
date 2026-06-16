@@ -1,7 +1,9 @@
 prototype/
+.DS_Store
 kafka-shell
 node_modules/
 dist/
+dist-artifacts/
 .tmp/
 src-tauri/target/
 src-tauri/gen/
