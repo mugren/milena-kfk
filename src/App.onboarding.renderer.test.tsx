@@ -25,6 +25,44 @@ beforeEach(resetRendererHarness);
 afterEach(cleanupRendererHarness);
 
 describe("App onboarding renderer flow", () => {
+  it("exposes compact appearance choices in the environment chooser", async () => {
+    const { user } = renderAppChooser();
+
+    const chooser = await screen.findByLabelText("Environment chooser");
+    const appearance = within(chooser).getByRole("group", {
+      name: "Appearance",
+    });
+    const system = within(appearance).getByRole("button", {
+      name: "Use system appearance",
+    });
+    const light = within(appearance).getByRole("button", {
+      name: "Use light appearance",
+    });
+    const dark = within(appearance).getByRole("button", {
+      name: "Use dark appearance",
+    });
+
+    expect(system).toHaveAttribute("aria-pressed", "true");
+    expect(light).toHaveAttribute("aria-pressed", "false");
+    expect(dark).toHaveAttribute("aria-pressed", "false");
+    expect(system).toHaveAttribute("title", "System");
+    expect(light).toHaveAttribute("title", "Light");
+    expect(dark).toHaveAttribute("title", "Dark");
+    expect(system).toHaveTextContent("");
+    expect(light).toHaveTextContent("");
+    expect(dark).toHaveTextContent("");
+    expect(system.querySelector("svg")).not.toBeNull();
+    expect(light.querySelector("svg")).not.toBeNull();
+    expect(dark.querySelector("svg")).not.toBeNull();
+
+    await user.click(light);
+
+    expect(system).toHaveAttribute("aria-pressed", "false");
+    expect(light).toHaveAttribute("aria-pressed", "true");
+    expect(dark).toHaveAttribute("aria-pressed", "false");
+    expect(document.documentElement).toHaveAttribute("data-theme", "light");
+  });
+
   it("opens the add form on first run and saves without opening a workspace", async () => {
     tauri.listEnvironments.mockResolvedValueOnce({ environments: [] });
     const { user } = renderAppChooser();

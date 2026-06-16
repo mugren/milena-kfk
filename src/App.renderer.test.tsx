@@ -34,7 +34,10 @@ import type { KafkaConsumerSession } from "./lib/tauri";
 import type { WorkspacePane } from "./lib/workspace";
 
 beforeEach(resetRendererHarness);
-afterEach(cleanupRendererHarness);
+afterEach(() => {
+  cleanupRendererHarness();
+  vi.unstubAllGlobals();
+});
 
 describe("App renderer flow harness", () => {
   it("renders the shell without opening a Kafka connection", async () => {
@@ -85,6 +88,79 @@ describe("App renderer flow harness", () => {
     await user.click(screen.getByRole("button", { name: "Change environment" }));
 
     expect(onChangeEnvironment).toHaveBeenCalledWith("local-dev");
+  });
+
+  it("exposes compact appearance choices in the workspace inspector", async () => {
+    const { user } = renderApp();
+
+    const rightRail = screen.getByLabelText("Activity log");
+    const appearance = within(rightRail).getByRole("group", {
+      name: "Appearance",
+    });
+    const system = within(appearance).getByRole("button", {
+      name: "Use system appearance",
+    });
+    const light = within(appearance).getByRole("button", {
+      name: "Use light appearance",
+    });
+    const dark = within(appearance).getByRole("button", {
+      name: "Use dark appearance",
+    });
+
+    expect(system).toHaveAttribute("aria-pressed", "true");
+    expect(light).toHaveAttribute("aria-pressed", "false");
+    expect(dark).toHaveAttribute("aria-pressed", "false");
+    expect(system).toHaveAttribute("title", "System");
+    expect(light).toHaveAttribute("title", "Light");
+    expect(dark).toHaveAttribute("title", "Dark");
+    expect(system).toHaveTextContent("");
+    expect(light).toHaveTextContent("");
+    expect(dark).toHaveTextContent("");
+    expect(system.querySelector("svg")).not.toBeNull();
+    expect(light.querySelector("svg")).not.toBeNull();
+    expect(dark.querySelector("svg")).not.toBeNull();
+
+    await user.click(dark);
+
+    expect(system).toHaveAttribute("aria-pressed", "false");
+    expect(light).toHaveAttribute("aria-pressed", "false");
+    expect(dark).toHaveAttribute("aria-pressed", "true");
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+  });
+
+  it("keeps system appearance synced with operating system changes", () => {
+    let systemPrefersDark = false;
+    const listeners = new Set<() => void>();
+
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: systemPrefersDark,
+      media: query,
+      onchange: null,
+      addEventListener: (event: string, listener: () => void) => {
+        if (event === "change") {
+          listeners.add(listener);
+        }
+      },
+      removeEventListener: (event: string, listener: () => void) => {
+        if (event === "change") {
+          listeners.delete(listener);
+        }
+      },
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => true,
+    }));
+
+    renderApp();
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "light");
+
+    act(() => {
+      systemPrefersDark = true;
+      listeners.forEach((listener) => listener());
+    });
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
   });
 
   it("keeps hideable side columns with icon controls without losing pane state", async () => {

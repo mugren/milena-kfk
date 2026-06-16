@@ -19,6 +19,8 @@ import {
   ChevronUp,
   Maximize2,
   Minimize2,
+  Monitor,
+  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -29,6 +31,7 @@ import {
   SplitSquareHorizontal,
   SplitSquareVertical,
   Square,
+  Sun,
   X,
 } from "lucide-react";
 import {
@@ -44,11 +47,18 @@ import {
   saveEnvironment,
   startKafkaConsumerSession,
   stopKafkaConsumerSession,
+  setAppAppearanceTheme,
   type MilenaCommandError,
   type MilenaBoundaryEvent,
   type KafkaTopicMetadata,
   type SavedEnvironment,
 } from "./lib/tauri";
+import {
+  applyAppearancePreference,
+  readAppearancePreference,
+  writeAppearancePreference,
+  type AppearancePreference,
+} from "./lib/appearance";
 import {
   appendBoundaryEventActivity,
   appendGlobalError,
@@ -154,6 +164,32 @@ type VisibleColumns = {
   inspector: boolean;
 };
 
+const APPEARANCE_OPTIONS: {
+  value: AppearancePreference;
+  label: string;
+  ariaLabel: string;
+  icon: typeof Monitor;
+}[] = [
+  {
+    value: "system",
+    label: "System",
+    ariaLabel: "Use system appearance",
+    icon: Monitor,
+  },
+  {
+    value: "light",
+    label: "Light",
+    ariaLabel: "Use light appearance",
+    icon: Sun,
+  },
+  {
+    value: "dark",
+    label: "Dark",
+    ariaLabel: "Use dark appearance",
+    icon: Moon,
+  },
+];
+
 type TestedTopicList = {
   environmentSignature: string;
   topics: KafkaTopicMetadata[];
@@ -175,7 +211,41 @@ const localDevRuntimeAuth: RuntimeAuthConfig = {
   },
 };
 
+function useAppliedAppearancePreference(
+  appearancePreference: AppearancePreference,
+  enabled: boolean,
+) {
+  useEffect(() => {
+    if (!enabled) {
+      return undefined;
+    }
+
+    applyAppearancePreference(appearancePreference);
+    void setAppAppearanceTheme(appearancePreference);
+
+    if (appearancePreference !== "system") {
+      return undefined;
+    }
+
+    const systemScheme = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!systemScheme) {
+      return undefined;
+    }
+
+    function applySystemAppearance() {
+      applyAppearancePreference("system");
+    }
+
+    systemScheme.addEventListener("change", applySystemAppearance);
+    return () => {
+      systemScheme.removeEventListener("change", applySystemAppearance);
+    };
+  }, [appearancePreference, enabled]);
+}
+
 function App() {
+  const [appearancePreference, setAppearancePreference] =
+    useState(readAppearancePreference);
   const [activeRuntimeAuth, setActiveRuntimeAuth] =
     useState<RuntimeAuthConfig | null>(null);
   const [initialWorkspaceTopics, setInitialWorkspaceTopics] =
@@ -192,6 +262,8 @@ function App() {
   useEffect(() => {
     document.title = APP_SHELL_NAME;
   }, []);
+
+  useAppliedAppearancePreference(appearancePreference, true);
 
   useEffect(() => {
     void refreshEnvironments("quiet");
@@ -233,6 +305,11 @@ function App() {
 
   function updateOnboarding(update: (current: OnboardingState) => OnboardingState) {
     setOnboarding((current) => (current ? update(current) : current));
+  }
+
+  function changeAppearancePreference(preference: AppearancePreference) {
+    writeAppearancePreference(preference);
+    setAppearancePreference(preference);
   }
 
   function chooseEnvironment(environmentName: string) {
@@ -542,7 +619,9 @@ function App() {
       <WorkspaceShell
         activeRuntimeAuth={activeRuntimeAuth}
         autoLoadTopics={initialWorkspaceTopics === null}
+        appearancePreference={appearancePreference}
         initialTopics={initialWorkspaceTopics}
+        onAppearancePreferenceChange={changeAppearancePreference}
         onChangeEnvironment={changeEnvironment}
       />
     );
@@ -551,8 +630,10 @@ function App() {
   return (
     <EnvironmentChooser
       onboarding={onboarding}
+      appearancePreference={appearancePreference}
       status={chooserStatus}
       onAdd={startAdd}
+      onAppearancePreferenceChange={changeAppearancePreference}
       onCancel={cancelForm}
       onCancelDelete={cancelDelete}
       onConfirmDelete={() => void confirmDelete()}
@@ -576,8 +657,10 @@ type ChooserStatus = {
 
 function EnvironmentChooser({
   onboarding,
+  appearancePreference,
   status,
   onAdd,
+  onAppearancePreferenceChange,
   onCancel,
   onCancelDelete,
   onConfirmDelete,
@@ -592,8 +675,10 @@ function EnvironmentChooser({
   onTestSelected,
 }: {
   onboarding: OnboardingState | null;
+  appearancePreference: AppearancePreference;
   status: ChooserStatus;
   onAdd: () => void;
+  onAppearancePreferenceChange: (preference: AppearancePreference) => void;
   onCancel: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
@@ -679,6 +764,10 @@ function EnvironmentChooser({
             <small>Saved Kafka connection profiles</small>
           </div>
           <div className="chooser-actions">
+            <AppearanceControl
+              value={appearancePreference}
+              onChange={onAppearancePreferenceChange}
+            />
             <span className={`status-pill ${status.tone}`}>{status.message}</span>
             <button
               className="rail-toggle-button"
@@ -1077,15 +1166,21 @@ function FieldError({
 
 export function WorkspaceShell({
   activeRuntimeAuth = localDevRuntimeAuth,
+  appearancePreference,
   autoLoadTopics = false,
   initialTopics = null,
+  onAppearancePreferenceChange,
   onChangeEnvironment,
 }: {
   activeRuntimeAuth?: RuntimeAuthConfig;
+  appearancePreference?: AppearancePreference;
   autoLoadTopics?: boolean;
   initialTopics?: KafkaTopicMetadata[] | null;
+  onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
   onChangeEnvironment?: (environmentName: string) => void;
 }) {
+  const [localAppearancePreference, setLocalAppearancePreference] =
+    useState(readAppearancePreference);
   const [appState, setAppState] = useState<AppState | null>(null);
   const [workspace, setWorkspace] = useState(createInitialWorkspaceState);
   const [topicRail, setTopicRail] = useState(() =>
@@ -1112,10 +1207,17 @@ export function WorkspaceShell({
   const requestedTopicLoads = useRef(new Set<string>());
   const workspaceRef = useRef(workspace);
   const pollingRuns = useRef(new Map<number, number>());
+  const currentAppearancePreference =
+    appearancePreference ?? localAppearancePreference;
 
   useEffect(() => {
     document.title = APP_SHELL_NAME;
   }, []);
+
+  useAppliedAppearancePreference(
+    currentAppearancePreference,
+    appearancePreference === undefined,
+  );
 
   useEffect(() => {
     loadAppState()
@@ -1436,6 +1538,14 @@ export function WorkspaceShell({
     }));
   }
 
+  function changeAppearancePreference(preference: AppearancePreference) {
+    if (appearancePreference === undefined) {
+      writeAppearancePreference(preference);
+      setLocalAppearancePreference(preference);
+    }
+    onAppearancePreferenceChange?.(preference);
+  }
+
   function changeActiveEnvironment() {
     const currentWorkspace = workspaceRef.current;
     const sessionIds = Array.from(
@@ -1705,6 +1815,8 @@ export function WorkspaceShell({
           layout={workspace.layout}
           paneCount={workspace.panes.length}
           topicPreview={topicPreview}
+          appearancePreference={currentAppearancePreference}
+          onAppearancePreferenceChange={changeAppearancePreference}
           onClearActivity={clearActivityLog}
           onHideInspector={() => setColumnVisibility("inspector", false)}
         />
@@ -1721,20 +1833,55 @@ export function WorkspaceShell({
   );
 }
 
+function AppearanceControl({
+  value,
+  onChange,
+}: {
+  value: AppearancePreference;
+  onChange: (preference: AppearancePreference) => void;
+}) {
+  return (
+    <div className="appearance-control" role="group" aria-label="Appearance">
+      {APPEARANCE_OPTIONS.map((option) => {
+        const Icon = option.icon;
+        const selected = option.value === value;
+
+        return (
+          <button
+            className="appearance-option"
+            type="button"
+            aria-label={option.ariaLabel}
+            aria-pressed={selected}
+            key={option.value}
+            title={option.label}
+            onClick={() => onChange(option.value)}
+          >
+            <Icon aria-hidden="true" size={14} strokeWidth={1.9} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function RightRail({
   activePane,
   activity,
+  appearancePreference = "system",
   layout,
   paneCount,
   topicPreview,
+  onAppearancePreferenceChange = () => undefined,
   onClearActivity,
   onHideInspector = () => undefined,
 }: {
   activePane: WorkspacePane | undefined;
   activity: GlobalActivityEntry[];
+  appearancePreference?: AppearancePreference;
   layout: WorkspaceState["layout"];
   paneCount: number;
   topicPreview: TopicPreviewModel | null;
+  onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
   onClearActivity: () => void;
   onHideInspector?: () => void;
 }) {
@@ -1760,6 +1907,10 @@ export function RightRail({
           <small>{inspectorContext}</small>
         </div>
         <div className="rail-header-actions">
+          <AppearanceControl
+            value={appearancePreference}
+            onChange={onAppearancePreferenceChange}
+          />
           <span className={`status-pill ${statusClass}`}>{contextPill}</span>
           <button
             className="rail-toggle-button"
