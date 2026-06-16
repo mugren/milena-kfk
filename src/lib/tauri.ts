@@ -1,4 +1,10 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { setTheme } from "@tauri-apps/api/app";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import type { Theme } from "@tauri-apps/api/window";
+
+export type AppAppearancePreference = "system" | "light" | "dark";
+
+type NativeAppearanceTheme = Theme | null;
 
 export type MilenaCapability =
   | "command-boundary"
@@ -210,6 +216,23 @@ export type KafkaRecordHeaders =
 
 export async function loadAppState(): Promise<AppState> {
   return invoke<AppState>("get_app_state");
+}
+
+export async function setAppAppearanceTheme(
+  preference: AppAppearancePreference,
+): Promise<void> {
+  if (!isTauri()) {
+    return;
+  }
+
+  const theme: NativeAppearanceTheme =
+    preference === "system" ? null : preference;
+
+  try {
+    await setTheme(theme);
+  } catch {
+    // Non-Tauri test shells can import the API without having IPC available.
+  }
 }
 
 export async function previewTopicSession(

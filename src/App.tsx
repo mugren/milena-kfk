@@ -13,11 +13,14 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   Trash2,
   ChevronDown,
   ChevronUp,
   Maximize2,
   Minimize2,
+  Monitor,
+  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -28,6 +31,7 @@ import {
   SplitSquareHorizontal,
   SplitSquareVertical,
   Square,
+  Sun,
   X,
 } from "lucide-react";
 import {
@@ -43,11 +47,18 @@ import {
   saveEnvironment,
   startKafkaConsumerSession,
   stopKafkaConsumerSession,
+  setAppAppearanceTheme,
   type MilenaCommandError,
   type MilenaBoundaryEvent,
   type KafkaTopicMetadata,
   type SavedEnvironment,
 } from "./lib/tauri";
+import {
+  applyAppearancePreference,
+  readAppearancePreference,
+  writeAppearancePreference,
+  type AppearancePreference,
+} from "./lib/appearance";
 import {
   appendBoundaryEventActivity,
   appendGlobalError,
@@ -62,6 +73,7 @@ import {
   stopPanePollingSession,
 } from "./lib/polling";
 import {
+  consumerRecordMatchesFilter,
   removeMessageRenderPreferencesForEnvironment,
   readMessageRenderPreferences,
   renderKafkaRecord,
@@ -152,6 +164,32 @@ type VisibleColumns = {
   inspector: boolean;
 };
 
+const APPEARANCE_OPTIONS: {
+  value: AppearancePreference;
+  label: string;
+  ariaLabel: string;
+  icon: typeof Monitor;
+}[] = [
+  {
+    value: "system",
+    label: "System",
+    ariaLabel: "Use system appearance",
+    icon: Monitor,
+  },
+  {
+    value: "light",
+    label: "Light",
+    ariaLabel: "Use light appearance",
+    icon: Sun,
+  },
+  {
+    value: "dark",
+    label: "Dark",
+    ariaLabel: "Use dark appearance",
+    icon: Moon,
+  },
+];
+
 type TestedTopicList = {
   environmentSignature: string;
   topics: KafkaTopicMetadata[];
@@ -173,7 +211,41 @@ const localDevRuntimeAuth: RuntimeAuthConfig = {
   },
 };
 
+function useAppliedAppearancePreference(
+  appearancePreference: AppearancePreference,
+  enabled: boolean,
+) {
+  useEffect(() => {
+    if (!enabled) {
+      return undefined;
+    }
+
+    applyAppearancePreference(appearancePreference);
+    void setAppAppearanceTheme(appearancePreference);
+
+    if (appearancePreference !== "system") {
+      return undefined;
+    }
+
+    const systemScheme = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!systemScheme) {
+      return undefined;
+    }
+
+    function applySystemAppearance() {
+      applyAppearancePreference("system");
+    }
+
+    systemScheme.addEventListener("change", applySystemAppearance);
+    return () => {
+      systemScheme.removeEventListener("change", applySystemAppearance);
+    };
+  }, [appearancePreference, enabled]);
+}
+
 function App() {
+  const [appearancePreference, setAppearancePreference] =
+    useState(readAppearancePreference);
   const [activeRuntimeAuth, setActiveRuntimeAuth] =
     useState<RuntimeAuthConfig | null>(null);
   const [initialWorkspaceTopics, setInitialWorkspaceTopics] =
@@ -190,6 +262,8 @@ function App() {
   useEffect(() => {
     document.title = APP_SHELL_NAME;
   }, []);
+
+  useAppliedAppearancePreference(appearancePreference, true);
 
   useEffect(() => {
     void refreshEnvironments("quiet");
@@ -231,6 +305,11 @@ function App() {
 
   function updateOnboarding(update: (current: OnboardingState) => OnboardingState) {
     setOnboarding((current) => (current ? update(current) : current));
+  }
+
+  function changeAppearancePreference(preference: AppearancePreference) {
+    writeAppearancePreference(preference);
+    setAppearancePreference(preference);
   }
 
   function chooseEnvironment(environmentName: string) {
@@ -540,7 +619,9 @@ function App() {
       <WorkspaceShell
         activeRuntimeAuth={activeRuntimeAuth}
         autoLoadTopics={initialWorkspaceTopics === null}
+        appearancePreference={appearancePreference}
         initialTopics={initialWorkspaceTopics}
+        onAppearancePreferenceChange={changeAppearancePreference}
         onChangeEnvironment={changeEnvironment}
       />
     );
@@ -549,8 +630,10 @@ function App() {
   return (
     <EnvironmentChooser
       onboarding={onboarding}
+      appearancePreference={appearancePreference}
       status={chooserStatus}
       onAdd={startAdd}
+      onAppearancePreferenceChange={changeAppearancePreference}
       onCancel={cancelForm}
       onCancelDelete={cancelDelete}
       onConfirmDelete={() => void confirmDelete()}
@@ -574,8 +657,10 @@ type ChooserStatus = {
 
 function EnvironmentChooser({
   onboarding,
+  appearancePreference,
   status,
   onAdd,
+  onAppearancePreferenceChange,
   onCancel,
   onCancelDelete,
   onConfirmDelete,
@@ -590,8 +675,10 @@ function EnvironmentChooser({
   onTestSelected,
 }: {
   onboarding: OnboardingState | null;
+  appearancePreference: AppearancePreference;
   status: ChooserStatus;
   onAdd: () => void;
+  onAppearancePreferenceChange: (preference: AppearancePreference) => void;
   onCancel: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
@@ -677,6 +764,10 @@ function EnvironmentChooser({
             <small>Saved Kafka connection profiles</small>
           </div>
           <div className="chooser-actions">
+            <AppearanceControl
+              value={appearancePreference}
+              onChange={onAppearancePreferenceChange}
+            />
             <span className={`status-pill ${status.tone}`}>{status.message}</span>
             <button
               className="rail-toggle-button"
@@ -1075,15 +1166,21 @@ function FieldError({
 
 export function WorkspaceShell({
   activeRuntimeAuth = localDevRuntimeAuth,
+  appearancePreference,
   autoLoadTopics = false,
   initialTopics = null,
+  onAppearancePreferenceChange,
   onChangeEnvironment,
 }: {
   activeRuntimeAuth?: RuntimeAuthConfig;
+  appearancePreference?: AppearancePreference;
   autoLoadTopics?: boolean;
   initialTopics?: KafkaTopicMetadata[] | null;
+  onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
   onChangeEnvironment?: (environmentName: string) => void;
 }) {
+  const [localAppearancePreference, setLocalAppearancePreference] =
+    useState(readAppearancePreference);
   const [appState, setAppState] = useState<AppState | null>(null);
   const [workspace, setWorkspace] = useState(createInitialWorkspaceState);
   const [topicRail, setTopicRail] = useState(() =>
@@ -1110,10 +1207,17 @@ export function WorkspaceShell({
   const requestedTopicLoads = useRef(new Set<string>());
   const workspaceRef = useRef(workspace);
   const pollingRuns = useRef(new Map<number, number>());
+  const currentAppearancePreference =
+    appearancePreference ?? localAppearancePreference;
 
   useEffect(() => {
     document.title = APP_SHELL_NAME;
   }, []);
+
+  useAppliedAppearancePreference(
+    currentAppearancePreference,
+    appearancePreference === undefined,
+  );
 
   useEffect(() => {
     loadAppState()
@@ -1434,6 +1538,14 @@ export function WorkspaceShell({
     }));
   }
 
+  function changeAppearancePreference(preference: AppearancePreference) {
+    if (appearancePreference === undefined) {
+      writeAppearancePreference(preference);
+      setLocalAppearancePreference(preference);
+    }
+    onAppearancePreferenceChange?.(preference);
+  }
+
   function changeActiveEnvironment() {
     const currentWorkspace = workspaceRef.current;
     const sessionIds = Array.from(
@@ -1477,7 +1589,6 @@ export function WorkspaceShell({
               <small>{activeRuntimeAuth.environment}</small>
             </div>
             <div className="rail-header-actions">
-              <span className="status-pill">local</span>
               <button
                 className="rail-toggle-button"
                 type="button"
@@ -1704,6 +1815,8 @@ export function WorkspaceShell({
           layout={workspace.layout}
           paneCount={workspace.panes.length}
           topicPreview={topicPreview}
+          appearancePreference={currentAppearancePreference}
+          onAppearancePreferenceChange={changeAppearancePreference}
           onClearActivity={clearActivityLog}
           onHideInspector={() => setColumnVisibility("inspector", false)}
         />
@@ -1720,20 +1833,55 @@ export function WorkspaceShell({
   );
 }
 
+function AppearanceControl({
+  value,
+  onChange,
+}: {
+  value: AppearancePreference;
+  onChange: (preference: AppearancePreference) => void;
+}) {
+  return (
+    <div className="appearance-control" role="group" aria-label="Appearance">
+      {APPEARANCE_OPTIONS.map((option) => {
+        const Icon = option.icon;
+        const selected = option.value === value;
+
+        return (
+          <button
+            className="appearance-option"
+            type="button"
+            aria-label={option.ariaLabel}
+            aria-pressed={selected}
+            key={option.value}
+            title={option.label}
+            onClick={() => onChange(option.value)}
+          >
+            <Icon aria-hidden="true" size={14} strokeWidth={1.9} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function RightRail({
   activePane,
   activity,
+  appearancePreference = "system",
   layout,
   paneCount,
   topicPreview,
+  onAppearancePreferenceChange = () => undefined,
   onClearActivity,
   onHideInspector = () => undefined,
 }: {
   activePane: WorkspacePane | undefined;
   activity: GlobalActivityEntry[];
+  appearancePreference?: AppearancePreference;
   layout: WorkspaceState["layout"];
   paneCount: number;
   topicPreview: TopicPreviewModel | null;
+  onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
   onClearActivity: () => void;
   onHideInspector?: () => void;
 }) {
@@ -1759,6 +1907,10 @@ export function RightRail({
           <small>{inspectorContext}</small>
         </div>
         <div className="rail-header-actions">
+          <AppearanceControl
+            value={appearancePreference}
+            onChange={onAppearancePreferenceChange}
+          />
           <span className={`status-pill ${statusClass}`}>{contextPill}</span>
           <button
             className="rail-toggle-button"
@@ -1910,10 +2062,15 @@ export function Pane({
     () => new Set(),
   );
   const [publisherExpanded, setPublisherExpanded] = useState(false);
+  const [consumerFilter, setConsumerFilter] = useState("");
   useEffect(() => {
     setPublisherExpanded(false);
+    setConsumerFilter("");
   }, [pane.id, pane.topic]);
   const recordEvents = pane.activity.filter(isKafkaRecordEvent);
+  const visibleRecordEvents = recordEvents.filter((event) =>
+    consumerRecordMatchesFilter(event.data.record, consumerFilter),
+  );
   const payloadValidation = validatePublisherPayload(publisher.payload);
   const canSend = canSendPublisherRecord(pane, publisher);
   const publisherReadiness = publisherReadinessLabel(
@@ -2060,25 +2217,43 @@ export function Pane({
             <span className="eyebrow">Consumer</span>
             <div className="consumer-controls">
               {pane.topic ? (
-                <label
-                  className="render-mode-control"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <span>Render</span>
-                  <select
-                    aria-label={`Render mode for ${pane.topic}`}
-                    value={renderMode}
-                    onChange={(event) =>
-                      onRenderModeChange(
-                        pane.topic ?? "",
-                        event.currentTarget.value as MessageRenderMode,
-                      )
-                    }
+                <>
+                  <label
+                    className="consumer-filter-control"
+                    onClick={(event) => event.stopPropagation()}
                   >
-                    <option value="json">JSON</option>
-                    <option value="raw">Raw</option>
-                  </select>
-                </label>
+                    <Search aria-hidden="true" size={12} strokeWidth={2} />
+                    <span>Filter</span>
+                    <input
+                      aria-label={`Filter records for pane ${pane.id}`}
+                      type="search"
+                      placeholder="Key or payload"
+                      value={consumerFilter}
+                      onChange={(event) =>
+                        setConsumerFilter(event.currentTarget.value)
+                      }
+                    />
+                  </label>
+                  <label
+                    className="render-mode-control"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <span>Render</span>
+                    <select
+                      aria-label={`Render mode for ${pane.topic}`}
+                      value={renderMode}
+                      onChange={(event) =>
+                        onRenderModeChange(
+                          pane.topic ?? "",
+                          event.currentTarget.value as MessageRenderMode,
+                        )
+                      }
+                    >
+                      <option value="json">JSON</option>
+                      <option value="raw">Raw</option>
+                    </select>
+                  </label>
+                </>
               ) : null}
               <button
                 className="secondary compact consumer-clear-button"
@@ -2097,8 +2272,10 @@ export function Pane({
           <div className="message-stream">
             {recordEvents.length === 0 ? (
               <p className="empty-state">Inactive</p>
+            ) : visibleRecordEvents.length === 0 ? (
+              <p className="empty-state">No matching records</p>
             ) : (
-              recordEvents.map((event) => {
+              visibleRecordEvents.map((event) => {
                 const collapsed = renderKafkaRecord(event.data.record, {
                   mode: renderMode,
                 });
@@ -2111,6 +2288,7 @@ export function Pane({
                   <MessageStreamRow
                     key={rendered.identity}
                     message={rendered}
+                    filter={consumerFilter}
                     onToggle={() => toggleRow(rendered.identity)}
                   />
                 );
@@ -2209,9 +2387,11 @@ export function Pane({
 
 function MessageStreamRow({
   message,
+  filter,
   onToggle,
 }: {
   message: RenderedKafkaRecord;
+  filter: string;
   onToggle: () => void;
 }) {
   return (
@@ -2238,13 +2418,15 @@ function MessageStreamRow({
           p{message.partition} / {message.offset}
         </span>
         {message.key ? (
-          <span className="message-key">key {message.key}</span>
+          <span className="message-key">
+            key {renderHighlightedText(message.key, filter)}
+          </span>
         ) : null}
         <span className="message-preview">
           {message.payload.marker ? (
             <span className="message-marker">{message.payload.marker}</span>
           ) : null}
-          <code>{message.payload.preview}</code>
+          <code>{renderHighlightedText(message.payload.preview, filter)}</code>
           {message.payload.previewTruncated ? (
             <span className="message-marker">truncated</span>
           ) : null}
@@ -2253,7 +2435,7 @@ function MessageStreamRow({
 
       {message.expanded ? (
         <div className="message-expanded">
-          <pre>{message.payload.content}</pre>
+          <pre>{renderHighlightedText(message.payload.content, filter)}</pre>
           {message.payload.contentTruncated ? (
             <span className="message-marker">payload truncated</span>
           ) : null}
@@ -2276,6 +2458,40 @@ function MessageStreamRow({
       ) : null}
     </article>
   );
+}
+
+function renderHighlightedText(text: string, filter: string): ReactNode {
+  const query = filter.trim();
+  if (!query) {
+    return text;
+  }
+
+  const lowerText = text.toLocaleLowerCase();
+  const lowerQuery = query.toLocaleLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let matchIndex = lowerText.indexOf(lowerQuery);
+
+  while (matchIndex !== -1) {
+    if (matchIndex > cursor) {
+      parts.push(text.slice(cursor, matchIndex));
+    }
+
+    const matchEnd = matchIndex + query.length;
+    parts.push(
+      <mark className="message-match" key={`${matchIndex}-${matchEnd}`}>
+        {text.slice(matchIndex, matchEnd)}
+      </mark>,
+    );
+    cursor = matchEnd;
+    matchIndex = lowerText.indexOf(lowerQuery, cursor);
+  }
+
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+
+  return parts;
 }
 
 function TopicContextMenu({

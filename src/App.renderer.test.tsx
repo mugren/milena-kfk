@@ -34,7 +34,10 @@ import type { KafkaConsumerSession } from "./lib/tauri";
 import type { WorkspacePane } from "./lib/workspace";
 
 beforeEach(resetRendererHarness);
-afterEach(cleanupRendererHarness);
+afterEach(() => {
+  cleanupRendererHarness();
+  vi.unstubAllGlobals();
+});
 
 describe("App renderer flow harness", () => {
   it("renders the shell without opening a Kafka connection", async () => {
@@ -49,6 +52,7 @@ describe("App renderer flow harness", () => {
     const topicsRail = screen.getByLabelText("Kafka topics");
     expect(within(topicsRail).getByText("Milena - Kafka Reader")).toBeVisible();
     expect(within(topicsRail).getByText("local-dev")).toBeVisible();
+    expect(within(topicsRail).queryByText("local")).not.toBeInTheDocument();
     expect(within(topicsRail).queryByText("macos-dev")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Activity log")).toHaveTextContent("no panes");
@@ -84,6 +88,79 @@ describe("App renderer flow harness", () => {
     await user.click(screen.getByRole("button", { name: "Change environment" }));
 
     expect(onChangeEnvironment).toHaveBeenCalledWith("local-dev");
+  });
+
+  it("exposes compact appearance choices in the workspace inspector", async () => {
+    const { user } = renderApp();
+
+    const rightRail = screen.getByLabelText("Activity log");
+    const appearance = within(rightRail).getByRole("group", {
+      name: "Appearance",
+    });
+    const system = within(appearance).getByRole("button", {
+      name: "Use system appearance",
+    });
+    const light = within(appearance).getByRole("button", {
+      name: "Use light appearance",
+    });
+    const dark = within(appearance).getByRole("button", {
+      name: "Use dark appearance",
+    });
+
+    expect(system).toHaveAttribute("aria-pressed", "true");
+    expect(light).toHaveAttribute("aria-pressed", "false");
+    expect(dark).toHaveAttribute("aria-pressed", "false");
+    expect(system).toHaveAttribute("title", "System");
+    expect(light).toHaveAttribute("title", "Light");
+    expect(dark).toHaveAttribute("title", "Dark");
+    expect(system).toHaveTextContent("");
+    expect(light).toHaveTextContent("");
+    expect(dark).toHaveTextContent("");
+    expect(system.querySelector("svg")).not.toBeNull();
+    expect(light.querySelector("svg")).not.toBeNull();
+    expect(dark.querySelector("svg")).not.toBeNull();
+
+    await user.click(dark);
+
+    expect(system).toHaveAttribute("aria-pressed", "false");
+    expect(light).toHaveAttribute("aria-pressed", "false");
+    expect(dark).toHaveAttribute("aria-pressed", "true");
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+  });
+
+  it("keeps system appearance synced with operating system changes", () => {
+    let systemPrefersDark = false;
+    const listeners = new Set<() => void>();
+
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: systemPrefersDark,
+      media: query,
+      onchange: null,
+      addEventListener: (event: string, listener: () => void) => {
+        if (event === "change") {
+          listeners.add(listener);
+        }
+      },
+      removeEventListener: (event: string, listener: () => void) => {
+        if (event === "change") {
+          listeners.delete(listener);
+        }
+      },
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => true,
+    }));
+
+    renderApp();
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "light");
+
+    act(() => {
+      systemPrefersDark = true;
+      listeners.forEach((listener) => listener());
+    });
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
   });
 
   it("keeps hideable side columns with icon controls without losing pane state", async () => {
@@ -454,6 +531,46 @@ describe("App renderer flow harness", () => {
     );
     expect(pane("1")).toHaveTextContent("idle");
     expect(pane("1")).toHaveTextContent("Inactive");
+  });
+
+  it("filters consumer records by key or payload and highlights visible matches", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-1");
+
+    emit("session-1", kafkaRecord("session-1", {
+      key: "Order-Alpha-42",
+      offset: 42,
+      payload: "{\"status\":\"paid\"}",
+    }));
+    emit("session-1", kafkaRecord("session-1", {
+      key: "Invoice-Beta-9",
+      offset: 43,
+      payload: "{\"status\":\"queued\"}",
+    }));
+    emit("session-1", kafkaRecord("session-1", {
+      key: null,
+      offset: 44,
+      payload: "{\"event\":\"PaymentAuthorized\"}",
+    }));
+
+    const paneOne = pane("1");
+    const filter = within(paneOne).getByLabelText("Filter records for pane 1");
+
+    await user.type(filter, "alpha");
+    expect(messageRowButton("Order-Alpha-42")).toBeVisible();
+    expect(paneOne).not.toHaveTextContent("Invoice-Beta-9");
+    expect(paneOne).not.toHaveTextContent("PaymentAuthorized");
+    expect(within(messageRowButton("Order-Alpha-42")).getByText("Alpha").tagName)
+      .toBe("MARK");
+
+    await user.clear(filter);
+    await user.type(filter, "paymentauthorized");
+    expect(paneOne).not.toHaveTextContent("Order-Alpha-42");
+    expect(screen.getByText("PaymentAuthorized")).toBeVisible();
+    expect(screen.getByText("PaymentAuthorized").tagName).toBe("MARK");
   });
 
   it("uses one stateful pane session button while starting, polling, and stopped", async () => {

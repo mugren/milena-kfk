@@ -165,6 +165,20 @@ export function stampKafkaRecordReceivedAt(
   };
 }
 
+export function consumerRecordMatchesFilter(
+  record: KafkaRecordEvent,
+  filter: string,
+): boolean {
+  const query = filter.trim().toLocaleLowerCase();
+  if (!query) {
+    return true;
+  }
+
+  return [record.key ?? "", record.payload ?? ""].some((candidate) =>
+    candidate.toLocaleLowerCase().includes(query),
+  );
+}
+
 export function kafkaRecordIdentity(record: KafkaRecordEvent): string {
   return [
     record.sessionId,

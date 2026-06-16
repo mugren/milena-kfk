@@ -1,0 +1,49 @@
+name: Version bump
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: version-bump-${{ github.event.pull_request.base.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump app version
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out base branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bump version from pull request labels
+        run: node scripts/bump-version.mjs --event "$GITHUB_EVENT_PATH"
+
+      - name: Commit and push version bump
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          if git diff --cached --quiet; then
+            echo "No version changes to commit"
+            exit 0
+          fi
+          git commit -m "chore: bump version to v$version [skip ci]"
+          git push origin HEAD:${{ github.event.pull_request.base.ref }}

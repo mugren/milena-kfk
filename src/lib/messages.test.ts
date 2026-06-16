@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  consumerRecordMatchesFilter,
   MESSAGE_RENDER_PREFERENCES_KEY,
   readMessageRenderPreferences,
   renderKafkaRecord,
@@ -238,6 +239,25 @@ describe("message rendering", () => {
         "2026-06-12T10:00:00.000Z",
       );
     }
+  });
+
+  it("matches consumer filters against keys and payloads case-insensitively", () => {
+    const keyed = record({
+      key: "Order-ABC-42",
+      payload: "{\"status\":\"paid\"}",
+    });
+    const payloadOnly = record({
+      key: null,
+      payload: "{\"event\":\"PaymentAuthorized\"}",
+    });
+
+    expect(consumerRecordMatchesFilter(keyed, "")).toBe(true);
+    expect(consumerRecordMatchesFilter(keyed, "abc")).toBe(true);
+    expect(consumerRecordMatchesFilter(keyed, "PAID")).toBe(true);
+    expect(consumerRecordMatchesFilter(payloadOnly, "paymentauthorized")).toBe(
+      true,
+    );
+    expect(consumerRecordMatchesFilter(payloadOnly, "missing")).toBe(false);
   });
 });
 

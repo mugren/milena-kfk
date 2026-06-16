@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TAURI_CONFIG="$ROOT_DIR/src-tauri/tauri.conf.json"
+DIST_DIR="${MILENA_PREVIEW_DIST_DIR:-$ROOT_DIR/dist-artifacts}"
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+info() {
+  printf '==> %s\n' "$*"
+}
+
+[[ "$(uname -s)" == "Darwin" ]] || die "preview packaging is macOS-only"
+command -v ditto >/dev/null 2>&1 || die "ditto is required to create the macOS zip"
+command -v node >/dev/null 2>&1 || die "Node.js is required to read package.json"
+[[ -f "$TAURI_CONFIG" ]] || die "missing Tauri config at $TAURI_CONFIG"
+
+read_config_field() {
+  local field="$1"
+  node -e "const fs = require('node:fs'); const config = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); process.stdout.write(config[process.argv[2]] ?? '');" "$TAURI_CONFIG" "$field"
+}
+
+PRODUCT_NAME="$(read_config_field productName)"
+VERSION="$(read_config_field version)"
+[[ -n "$PRODUCT_NAME" ]] || die "tauri.conf.json is missing productName"
+[[ -n "$VERSION" ]] || die "tauri.conf.json is missing version"
+
+APP_PATH="${MILENA_PREVIEW_APP_PATH:-$ROOT_DIR/src-tauri/target/release/bundle/macos/$PRODUCT_NAME.app}"
+ARTIFACT_NAME="$(
+  printf '%s' "$PRODUCT_NAME" | tr -cs '[:alnum:]' '-' | sed 's/^-//; s/-$//'
+)"
+
+ZIP_NAME="${MILENA_PREVIEW_ZIP_NAME:-$ARTIFACT_NAME-$VERSION-preview-macos.zip}"
+ZIP_PATH="$DIST_DIR/$ZIP_NAME"
+TMP_ZIP="$DIST_DIR/.$ZIP_NAME.tmp"
+
+if [[ "${MILENA_PREVIEW_SKIP_BUILD:-0}" != "1" ]]; then
+  info "building release app"
+  (cd "$ROOT_DIR" && npm run tauri:build)
+fi
+
+[[ -d "$APP_PATH" ]] || die "missing built app at $APP_PATH"
+
+mkdir -p "$DIST_DIR"
+rm -f "$TMP_ZIP"
+trap 'rm -f "$TMP_ZIP"' EXIT
+
+info "packaging $(basename "$APP_PATH")"
+ditto -c -k --norsrc --keepParent "$APP_PATH" "$TMP_ZIP"
+mv "$TMP_ZIP" "$ZIP_PATH"
+trap - EXIT
+
+info "created $ZIP_PATH"
