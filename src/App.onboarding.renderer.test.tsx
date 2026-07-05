@@ -324,11 +324,11 @@ describe("App onboarding renderer flow", () => {
 
     await openTopic(user, "orders.created");
     await user.click(
-      within(screen.getByLabelText("Publisher for pane 1")).getByRole("button", {
-        name: "Expand publisher for pane 1",
+      within(screen.getByLabelText("Publisher for tab 1")).getByRole("button", {
+        name: "Expand publisher for tab 1",
       }),
     );
-    fireEvent.change(screen.getByLabelText("JSON payload for pane 1"), {
+    fireEvent.change(screen.getByLabelText("JSON payload for tab 1"), {
       target: { value: "{\"draft\":true}" },
     });
     await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
@@ -360,7 +360,7 @@ describe("App onboarding renderer flow", () => {
 
     expect(await screen.findByLabelText("Milena workspace")).toBeVisible();
     await waitFor(() => expect(tauri.listKafkaTopics).toHaveBeenCalledTimes(2));
-    expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Milena workspace")).toHaveTextContent(
       "Select a topic to preview it.",
     );
@@ -373,11 +373,11 @@ describe("App onboarding renderer flow", () => {
 
     await openTopic(user, "orders.created");
     await user.click(
-      within(screen.getByLabelText("Publisher for pane 1")).getByRole("button", {
-        name: "Expand publisher for pane 1",
+      within(screen.getByLabelText("Publisher for tab 1")).getByRole("button", {
+        name: "Expand publisher for tab 1",
       }),
     );
-    expect(screen.getByLabelText("JSON payload for pane 1")).toHaveValue(`{
+    expect(screen.getByLabelText("JSON payload for tab 1")).toHaveValue(`{
   "topic": "orders.created",
   "event": "preview"
 }`);

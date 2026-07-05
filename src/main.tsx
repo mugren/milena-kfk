@@ -22,8 +22,22 @@ const appearancePreference = readBootAppearancePreference();
 applyAppearancePreference(appearancePreference);
 void setAppAppearanceTheme(appearancePreference);
 
+const shouldRenderDockviewPrototype =
+  import.meta.env.VITE_MILENA_PROTOTYPE === "dockview" ||
+  new URLSearchParams(window.location.search).get("prototype") === "dockview";
+
+const DockviewWorkspacePrototype = React.lazy(
+  () => import("./prototype/dockview-workspace/DockviewWorkspacePrototype"),
+);
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+  shouldRenderDockviewPrototype ? (
+    <React.Suspense fallback={<div>Loading Dockview prototype...</div>}>
+      <DockviewWorkspacePrototype />
+    </React.Suspense>
+  ) : (
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  ),
 );

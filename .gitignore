@@ -1,4 +1,6 @@
 prototype/
+!src/prototype/
+!src/prototype/**
 .DS_Store
 kafka-shell
 node_modules/

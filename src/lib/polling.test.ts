@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildLatestOnlyConsumerRequest,
+  defaultTabConsumerGroup,
   closePanePollingSession,
+  closeTabPollingSession,
   startPanePollingSession,
+  startTabPollingSession,
   stopPanePollingSession,
   type StartConsumerSession,
   type StopConsumerSession,
@@ -12,8 +15,11 @@ import {
   createInitialWorkspaceState,
   markPanePollingStarted,
   markPanePollingStarting,
-  splitPane,
+  moveTabToAdjacentGroup,
+  openTopicInFocusedGroup,
+  selectTab,
   type WorkspaceState,
+  type WorkspaceTab,
 } from "./workspace";
 import type {
   KafkaConsumerSession,
@@ -29,7 +35,10 @@ const auth: RuntimeAuthConfig = {
 
 describe("pane polling sessions", () => {
   it("starts consumers with latest-only offsets", async () => {
-    const store = workspaceStore(createInitialWorkspaceState());
+    const store = workspaceStore(
+      openTopicInFocusedGroup(createInitialWorkspaceState(), "orders.created")
+        .workspace,
+    );
     const startConsumerSession = vi
       .fn<StartConsumerSession>()
       .mockResolvedValue(session("session-1", "group-1", "orders.created"));
@@ -43,11 +52,38 @@ describe("pane polling sessions", () => {
     });
 
     expect(startConsumerSession).toHaveBeenCalledWith(
-      buildLatestOnlyConsumerRequest(auth, "orders.created"),
+      buildLatestOnlyConsumerRequest(
+        auth,
+        "orders.created",
+        defaultTabConsumerGroup(1),
+      ),
       expect.any(Function),
     );
     expect(startConsumerSession.mock.calls[0][0].fromBeginning).toBe(false);
     expect(store.getWorkspace().panes[0].consumerGroup).toBe("group-1");
+  });
+
+  it("does not start polling without an existing tab for the topic", async () => {
+    const store = workspaceStore(
+      openTopicInFocusedGroup(createInitialWorkspaceState(), "orders.created")
+        .workspace,
+    );
+    const startConsumerSession = vi.fn<StartConsumerSession>();
+
+    const started = await startTabPollingSession({
+      tabId: 1,
+      topic: "payments.authorized",
+      auth,
+      ...store,
+      startConsumerSession,
+    });
+
+    expect(started).toBeNull();
+    expect(startConsumerSession).not.toHaveBeenCalled();
+    expect(store.getWorkspace().panes[0]).toMatchObject({
+      topic: "orders.created",
+      status: "idle",
+    });
   });
 
   it("keeps the latest 1,000 pane messages", () => {
@@ -67,16 +103,20 @@ describe("pane polling sessions", () => {
     expect(recordOffset(pane.activity[999])).toBe(5);
   });
 
-  it("stops the pane session and attempts cleanup", async () => {
+  it("stops the pane session, preserves messages, and attempts cleanup", async () => {
     const store = workspaceStore(
-      markPanePollingStarted(
-        markPanePollingStarting(
-          createInitialWorkspaceState(),
+      appendPaneActivity(
+        markPanePollingStarted(
+          markPanePollingStarting(
+            createInitialWorkspaceState(),
+            1,
+            "orders.created",
+          ),
           1,
-          "orders.created",
+          session("session-1", "group-1", "orders.created"),
         ),
         1,
-        session("session-1", "group-1", "orders.created"),
+        record("session-1", 42),
       ),
     );
     const stopConsumerSession = vi
@@ -96,8 +136,9 @@ describe("pane polling sessions", () => {
       mode: "idle",
       status: "idle",
       session: null,
-      activity: [],
     });
+    expect(store.getWorkspace().panes[0].activity).toHaveLength(1);
+    expect(recordOffset(store.getWorkspace().panes[0].activity[0])).toBe(42);
   });
 
   it("closes the pane and still reports cleanup failures", async () => {
@@ -132,8 +173,58 @@ describe("pane polling sessions", () => {
     expect(store.getWorkspace().selectedPaneId).toBe(0);
   });
 
+  it("closes a hidden tab, cleans up its session, and ignores late events", async () => {
+    let workspace = openTopicInFocusedGroup(
+      createInitialWorkspaceState(),
+      "orders.created",
+    ).workspace;
+    workspace = openTopicInFocusedGroup(workspace, "payments.authorized").workspace;
+    const store = workspaceStore(workspace);
+    const onEvent = vi.fn();
+    let emitClosedTab: (event: MilenaBoundaryEvent) => void = () => {
+      throw new Error("closed tab event emitter was not captured");
+    };
+    const startConsumerSession = vi
+      .fn<StartConsumerSession>()
+      .mockImplementation(async (request, onEvent) => {
+        emitClosedTab = onEvent;
+        return session(
+          "session-hidden",
+          request.groupId ?? "group-hidden",
+          request.topics[0],
+        );
+      });
+    const stopConsumerSession = vi
+      .fn<StopConsumerSession>()
+      .mockResolvedValue(stopped("session-hidden", defaultTabConsumerGroup(1)));
+
+    await startTabPollingSession({
+      tabId: 1,
+      topic: "orders.created",
+      auth,
+      ...store,
+      startConsumerSession,
+      onEvent,
+    });
+    store.updateWorkspace((current) => selectTab(current, 2));
+
+    await closeTabPollingSession({
+      tabId: 1,
+      ...store,
+      stopConsumerSession,
+    });
+    emitClosedTab(record("session-hidden", 7));
+
+    expect(stopConsumerSession).toHaveBeenCalledWith({
+      sessionId: "session-hidden",
+    });
+    expect(store.getWorkspace().panes.map((tab) => tab.id)).toEqual([2]);
+    expect(tabById(store.getWorkspace(), 2).activity).toEqual([]);
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
   it("records unique group ids per pane", async () => {
-    const store = workspaceStore(splitPane(createInitialWorkspaceState(), 1, "right"));
+    const store = workspaceStore(splitTopicTabs());
     let nextGroup = 0;
     const startConsumerSession = vi
       .fn<StartConsumerSession>()
@@ -167,15 +258,113 @@ describe("pane polling sessions", () => {
     ]);
   });
 
+  it("keeps hidden open tabs polling under the 1,000-message cap", async () => {
+    let workspace = openTopicInFocusedGroup(
+      createInitialWorkspaceState(),
+      "orders.created",
+    ).workspace;
+    workspace = openTopicInFocusedGroup(workspace, "payments.authorized").workspace;
+    const store = workspaceStore(workspace);
+    let emitHiddenTab: (event: MilenaBoundaryEvent) => void = () => {
+      throw new Error("hidden tab event emitter was not captured");
+    };
+    const startConsumerSession = vi
+      .fn<StartConsumerSession>()
+      .mockImplementation(async (request, onEvent) => {
+        emitHiddenTab = onEvent;
+        return session(
+          "session-hidden",
+          request.groupId ?? "group-hidden",
+          request.topics[0],
+        );
+      });
+
+    await startTabPollingSession({
+      tabId: 1,
+      topic: "orders.created",
+      auth,
+      ...store,
+      startConsumerSession,
+    });
+    store.updateWorkspace((current) => selectTab(current, 2));
+
+    for (let offset = 0; offset < 1_005; offset += 1) {
+      emitHiddenTab(record("session-hidden", offset));
+    }
+
+    const workspaceAfterRecords = store.getWorkspace();
+    const hiddenTab = tabById(workspaceAfterRecords, 1);
+    const activeTab = tabById(workspaceAfterRecords, 2);
+    expect(workspaceAfterRecords.selectedPaneId).toBe(2);
+    expect(hiddenTab.activity).toHaveLength(1_000);
+    expect(recordOffset(hiddenTab.activity[0])).toBe(1_004);
+    expect(recordOffset(hiddenTab.activity[999])).toBe(5);
+    expect(activeTab.activity).toEqual([]);
+  });
+
+  it("preserves moved tab polling state and keeps routing by tab id", async () => {
+    let workspace = openTopicInFocusedGroup(
+      createInitialWorkspaceState(),
+      "orders.created",
+    ).workspace;
+    workspace = openTopicInFocusedGroup(workspace, "payments.authorized").workspace;
+    const store = workspaceStore(workspace);
+    let emitMovedTab: (event: MilenaBoundaryEvent) => void = () => {
+      throw new Error("moved tab event emitter was not captured");
+    };
+    const startConsumerSession = vi
+      .fn<StartConsumerSession>()
+      .mockImplementation(async (request, onEvent) => {
+        emitMovedTab = onEvent;
+        return session(
+          "session-moved",
+          request.groupId ?? "group-moved",
+          request.topics[0],
+        );
+      });
+
+    await startTabPollingSession({
+      tabId: 1,
+      topic: "orders.created",
+      auth,
+      ...store,
+      startConsumerSession,
+    });
+    emitMovedTab(record("session-moved", 1));
+    store.updateWorkspace(
+      (current) => moveTabToAdjacentGroup(current, 1, "right").workspace,
+    );
+    emitMovedTab(consumerError("session-moved", "broker heartbeat failed"));
+    emitMovedTab(record("other-session", 2));
+
+    const movedTab = tabById(store.getWorkspace(), 1);
+    const untouchedTab = tabById(store.getWorkspace(), 2);
+    expect(store.getWorkspace().groups).toHaveLength(2);
+    expect(movedTab).toMatchObject({
+      id: 1,
+      topic: "orders.created",
+      consumerGroup: defaultTabConsumerGroup(1),
+      mode: "poll",
+      status: "error",
+      error: "broker heartbeat failed",
+    });
+    expect(movedTab.session).toMatchObject({ sessionId: "session-moved" });
+    expect(movedTab.activity).toHaveLength(2);
+    expect(movedTab.activity[0].event).toBe("kafkaConsumerError");
+    expect(recordOffset(movedTab.activity[1])).toBe(1);
+    expect(untouchedTab.activity).toEqual([]);
+  });
+
   it("isolates one pane failure from another active poll", async () => {
-    const store = workspaceStore(splitPane(createInitialWorkspaceState(), 1, "right"));
+    const store = workspaceStore(splitTopicTabs());
     const onError = vi.fn();
     const startConsumerSession = vi
       .fn<StartConsumerSession>()
       .mockRejectedValueOnce(new Error("broker unavailable"))
-      .mockImplementationOnce(async (_request, onEvent) => {
-        onEvent(record("session-2", 9));
-        return session("session-2", "group-2", "payments.authorized");
+      .mockImplementationOnce(async (request, onEvent) => {
+        const sessionId = request.groupId ?? "session-2";
+        onEvent(record(sessionId, 9));
+        return session(sessionId, "group-2", "payments.authorized");
       });
 
     await Promise.all([
@@ -207,7 +396,7 @@ describe("pane polling sessions", () => {
   });
 
   it("renders runtime consumer errors on the affected pane only", async () => {
-    const store = workspaceStore(splitPane(createInitialWorkspaceState(), 1, "right"));
+    const store = workspaceStore(splitTopicTabs());
     let emitPaneOne: (event: MilenaBoundaryEvent) => void = () => {
       throw new Error("pane one event emitter was not captured");
     };
@@ -296,11 +485,11 @@ describe("pane polling sessions", () => {
       .mockRejectedValue(new Error("cleanup timeout"));
     const startConsumerSession = vi
       .fn<StartConsumerSession>()
-      .mockResolvedValue(session("session-2", "group-2", "payments.authorized"));
+      .mockResolvedValue(session("session-2", "group-2", "orders.created"));
 
     const started = await startPanePollingSession({
       paneId: 1,
-      topic: "payments.authorized",
+      topic: "orders.created",
       auth,
       ...store,
       startConsumerSession,
@@ -314,14 +503,81 @@ describe("pane polling sessions", () => {
     expect(onStopError).toHaveBeenCalledWith("cleanup timeout");
     expect(started?.sessionId).toBe("session-2");
     expect(store.getWorkspace().panes[0]).toMatchObject({
-      topic: "payments.authorized",
+      topic: "orders.created",
       consumerGroup: "group-2",
       status: "ready",
     });
   });
 
+  it("ignores stale events from a replaced tab polling session", async () => {
+    const store = workspaceStore(
+      openTopicInFocusedGroup(createInitialWorkspaceState(), "orders.created")
+        .workspace,
+    );
+    const onEvent = vi.fn();
+    let emitFirstRun: (event: MilenaBoundaryEvent) => void = () => {
+      throw new Error("first run event emitter was not captured");
+    };
+    let emitSecondRun: (event: MilenaBoundaryEvent) => void = () => {
+      throw new Error("second run event emitter was not captured");
+    };
+    const stopConsumerSession = vi
+      .fn<StopConsumerSession>()
+      .mockResolvedValue(stopped("session-1", defaultTabConsumerGroup(1)));
+    const startConsumerSession = vi
+      .fn<StartConsumerSession>()
+      .mockImplementationOnce(async (request, onEvent) => {
+        emitFirstRun = onEvent;
+        return session(
+          "session-1",
+          request.groupId ?? "group-1",
+          request.topics[0],
+        );
+      })
+      .mockImplementationOnce(async (request, onEvent) => {
+        emitSecondRun = onEvent;
+        emitFirstRun(record("session-1", 1));
+        return session(
+          "session-2",
+          request.groupId ?? "group-2",
+          request.topics[0],
+        );
+      });
+
+    await startTabPollingSession({
+      tabId: 1,
+      topic: "orders.created",
+      auth,
+      ...store,
+      startConsumerSession,
+      stopConsumerSession,
+      onEvent,
+    });
+    await startTabPollingSession({
+      tabId: 1,
+      topic: "orders.created",
+      auth,
+      ...store,
+      startConsumerSession,
+      stopConsumerSession,
+      onEvent,
+    });
+    emitFirstRun(record("session-1", 2));
+    emitSecondRun(record("session-2", 3));
+
+    const tab = tabById(store.getWorkspace(), 1);
+    expect(stopConsumerSession).toHaveBeenCalledWith({ sessionId: "session-1" });
+    expect(tab.session).toMatchObject({ sessionId: "session-2" });
+    expect(tab.activity).toHaveLength(1);
+    expect(recordOffset(tab.activity[0])).toBe(3);
+    expect(onEvent).toHaveBeenCalledTimes(1);
+  });
+
   it("cancels stale async starts through isCurrent and cleans up the new session", async () => {
-    const store = workspaceStore(createInitialWorkspaceState());
+    const store = workspaceStore(
+      openTopicInFocusedGroup(createInitialWorkspaceState(), "orders.created")
+        .workspace,
+    );
     let current = true;
     const stopConsumerSession = vi
       .fn<StopConsumerSession>()
@@ -351,7 +607,7 @@ describe("pane polling sessions", () => {
       topic: "orders.created",
       status: "loading",
       session: null,
-      consumerGroup: null,
+      consumerGroup: defaultTabConsumerGroup(1),
     });
   });
 });
@@ -426,4 +682,24 @@ function recordOffset(event: MilenaBoundaryEvent) {
   }
 
   return event.data.record.offset;
+}
+
+function tabById(workspace: WorkspaceState, tabId: number): WorkspaceTab {
+  const tab = workspace.groups
+    .flatMap((group) => group.tabs)
+    .find((candidate) => candidate.id === tabId);
+  if (!tab) {
+    throw new Error(`expected tab ${tabId}`);
+  }
+
+  return tab;
+}
+
+function splitTopicTabs(): WorkspaceState {
+  let workspace = openTopicInFocusedGroup(
+    createInitialWorkspaceState(),
+    "orders.created",
+  ).workspace;
+  workspace = openTopicInFocusedGroup(workspace, "payments.authorized").workspace;
+  return moveTabToAdjacentGroup(workspace, 2, "right").workspace;
 }

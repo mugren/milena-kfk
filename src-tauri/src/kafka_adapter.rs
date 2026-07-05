@@ -125,8 +125,12 @@ impl KafkaAdapter for NativeKafkaAdapter {
         E: BoundaryEventEmitter + Send + Sync + 'static,
     {
         let topics = normalize_topics(request.topics)?;
-        let group_id = next_consumer_group_id(&request.auth.environment);
-        let session_id = group_id.clone();
+        let group_id = request
+            .group_id
+            .clone()
+            .filter(|candidate| !candidate.trim().is_empty())
+            .unwrap_or_else(|| next_consumer_group_id(&request.auth.environment));
+        let session_id = next_consumer_group_id(&request.auth.environment);
         let mut native = build_native_client_config(&request.auth, Some(&group_id))?;
         native.set("enable.auto.commit", "false");
         native.set("enable.partition.eof", "false");

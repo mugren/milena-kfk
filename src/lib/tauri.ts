@@ -166,6 +166,7 @@ export type PublishKafkaRecordResponse = {
 export type StartKafkaConsumerSessionRequest = {
   auth: RuntimeAuthConfig;
   topics: string[];
+  groupId?: string | null;
   fromBeginning?: boolean;
 };
 

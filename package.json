@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "prototype:dockview": "VITE_MILENA_PROTOTYPE=dockview vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "test": "vitest run",
     "preview": "vite preview --host 127.0.0.1",
@@ -22,6 +23,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "dockview-react": "^6.6.1",
     "lucide-react": "^1.18.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

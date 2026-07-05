@@ -6,55 +6,91 @@ import type {
 } from "./tauri";
 
 export type BoundaryStatus = "idle" | "loading" | "ready" | "error";
-export type PaneMode = "idle" | TopicSessionPreviewRequest["mode"];
-export type PaneTone = "normal" | "warning" | "error";
-export type SplitDirection = "right" | "top" | "bottom";
+export type TabMode = "idle" | TopicSessionPreviewRequest["mode"];
+export type TabTone = "normal" | "warning" | "error";
+export type TabMoveDirection = "right" | "bottom";
+export type SplitDirection = TabMoveDirection | "top";
 export type TopicOpenPlacement = "selected" | SplitDirection;
-export type TopicOpenStatus = "opened" | "pane-limit" | "missing-target";
+export type TopicOpenStatus =
+  | "opened"
+  | "group-limit"
+  | "tab-limit"
+  | "pane-limit"
+  | "missing-target";
+export type WorkspaceActionStatus =
+  | "moved"
+  | "closed"
+  | "group-limit"
+  | "tab-limit"
+  | "missing-target";
 export type TopicOpenResult = {
   status: TopicOpenStatus;
   workspace: WorkspaceState;
 };
+export type WorkspaceActionResult = {
+  status: WorkspaceActionStatus;
+  workspace: WorkspaceState;
+};
 export type WorkspaceLayout = "single" | "two-right" | "two-top" | "quad";
 
-export type WorkspacePane = {
+export type WorkspaceTab = {
   id: number;
   topic: string | null;
+  title: string;
   consumerGroup: string | null;
-  mode: PaneMode;
+  mode: TabMode;
   status: BoundaryStatus;
   session: TopicSessionPreview | KafkaConsumerSession | null;
   activity: MilenaBoundaryEvent[];
   error: string | null;
-  tone: PaneTone;
+  tone: TabTone;
 };
 
-export const MAX_PANE_ACTIVITY = 1_000;
+export type WorkspaceGroup = {
+  id: number;
+  activeTabId: number;
+  tabs: WorkspaceTab[];
+};
 
 export type WorkspaceState = {
+  groups: WorkspaceGroup[];
+  focusedGroupId: number;
+  expandedGroupId: number | null;
+  selectedTopic: string | null;
+  nextGroupId: number;
+  nextTabId: number;
   layout: WorkspaceLayout;
   selectedPaneId: number;
   expandedPaneId: number | null;
-  selectedTopic: string | null;
   nextPaneId: number;
-  panes: WorkspacePane[];
+  panes: WorkspaceTab[];
 };
 
+export type PaneMode = TabMode;
+export type PaneTone = TabTone;
+export type WorkspacePane = Omit<WorkspaceTab, "title"> &
+  Partial<Pick<WorkspaceTab, "title">>;
+
+export const MAX_GROUPS = 4;
+export const MAX_TABS_PER_GROUP = 8;
+export const MAX_PANE_ACTIVITY = 1_000;
+
 export function createInitialWorkspaceState(): WorkspaceState {
-  return {
-    layout: "single",
-    selectedPaneId: 0,
-    expandedPaneId: null,
+  return withCompatibility({
+    groups: [],
+    focusedGroupId: 0,
+    expandedGroupId: null,
     selectedTopic: null,
-    nextPaneId: 1,
-    panes: [],
-  };
+    nextGroupId: 1,
+    nextTabId: 1,
+  });
 }
 
-export function createEmptyPane(id: number): WorkspacePane {
+export function createEmptyTab(id: number): WorkspaceTab {
   return {
     id,
     topic: null,
+    title: "",
     consumerGroup: null,
     mode: "idle",
     status: "idle",
@@ -65,156 +101,343 @@ export function createEmptyPane(id: number): WorkspacePane {
   };
 }
 
-export function isPaneEmpty(pane: WorkspacePane): boolean {
+export const createEmptyPane = createEmptyTab;
+
+export function isTabEmpty(tab: WorkspacePane): boolean {
   return (
-    pane.topic === null &&
-    pane.consumerGroup === null &&
-    pane.mode === "idle" &&
-    pane.status === "idle" &&
-    pane.session === null &&
-    pane.activity.length === 0 &&
-    pane.error === null
+    tab.topic === null &&
+    tab.consumerGroup === null &&
+    tab.mode === "idle" &&
+    tab.status === "idle" &&
+    tab.session === null &&
+    tab.activity.length === 0 &&
+    tab.error === null
   );
 }
 
-export function canStartPaneSession(
-  pane: WorkspacePane | undefined,
-): pane is WorkspacePane & { topic: string } {
-  return Boolean(pane?.topic);
+export const isPaneEmpty = isTabEmpty;
+
+export function canStartTabSession(
+  tab: WorkspacePane | undefined,
+): tab is WorkspacePane & { topic: string } {
+  return Boolean(tab?.topic);
 }
 
-export function getSelectedPane(
+export const canStartPaneSession = canStartTabSession;
+
+export function getFocusedGroup(
   workspace: WorkspaceState,
-): WorkspacePane | undefined {
+): WorkspaceGroup | undefined {
   return (
-    workspace.panes.find((pane) => pane.id === workspace.selectedPaneId) ??
-    workspace.panes[0]
+    workspace.groups.find((group) => group.id === workspace.focusedGroupId) ??
+    workspace.groups[0]
   );
 }
 
-export function selectPane(
+export function getActiveTab(
   workspace: WorkspaceState,
-  paneId: number,
+): WorkspaceTab | undefined {
+  const group = getFocusedGroup(workspace);
+  return (
+    group?.tabs.find((tab) => tab.id === group.activeTabId) ?? group?.tabs[0]
+  );
+}
+
+export const getSelectedPane = getActiveTab;
+
+export function selectGroup(
+  workspace: WorkspaceState,
+  groupId: number,
 ): WorkspaceState {
-  if (!workspace.panes.some((pane) => pane.id === paneId)) {
+  if (!workspace.groups.some((group) => group.id === groupId)) {
     return workspace;
   }
 
-  return { ...workspace, selectedPaneId: paneId };
+  return withCompatibility({ ...workspace, focusedGroupId: groupId });
 }
+
+export function selectTab(
+  workspace: WorkspaceState,
+  tabId: number,
+): WorkspaceState {
+  const location = findTabLocation(workspace, tabId);
+  if (!location) {
+    return workspace;
+  }
+
+  const groups = workspace.groups.map((group) =>
+    group.id === location.group.id ? { ...group, activeTabId: tabId } : group,
+  );
+
+  return withCompatibility({
+    ...workspace,
+    groups,
+    focusedGroupId: location.group.id,
+  });
+}
+
+export const selectPane = selectTab;
 
 export function selectTopicPreview(
   workspace: WorkspaceState,
   topic: string,
 ): WorkspaceState {
-  return { ...workspace, selectedTopic: topic };
+  return withCompatibility({ ...workspace, selectedTopic: topic });
 }
 
-export function expandPane(
+export function expandGroup(
   workspace: WorkspaceState,
-  paneId: number,
+  groupId: number,
 ): WorkspaceState {
-  const pane = workspace.panes.find((candidate) => candidate.id === paneId);
-  if (!pane) {
+  if (!workspace.groups.some((group) => group.id === groupId)) {
     return workspace;
   }
 
-  return {
+  return withCompatibility({
     ...workspace,
-    selectedPaneId: pane.id,
-    expandedPaneId: pane.id,
-    selectedTopic: pane.topic,
-  };
+    focusedGroupId: groupId,
+    expandedGroupId: groupId,
+    selectedTopic: getGroupActiveTab(workspace.groups, groupId)?.topic ?? null,
+  });
 }
 
-export function restoreExpandedPane(workspace: WorkspaceState): WorkspaceState {
-  if (workspace.expandedPaneId === null) {
+export function expandTab(
+  workspace: WorkspaceState,
+  tabId: number,
+): WorkspaceState {
+  const selected = selectTab(workspace, tabId);
+  if (selected === workspace) {
     return workspace;
   }
 
-  return {
-    ...workspace,
-    expandedPaneId: null,
-  };
+  return withCompatibility({
+    ...selected,
+    expandedGroupId: selected.focusedGroupId,
+    selectedTopic: getActiveTab(selected)?.topic ?? null,
+  });
 }
 
-export function assignTopicToPane(
-  workspace: WorkspaceState,
-  paneId: number,
-  topic: string,
-): WorkspaceState {
-  if (workspace.panes.length === 0) {
-    const pane = {
-      ...createEmptyPane(workspace.nextPaneId),
-      topic,
-      consumerGroup: `milena-preview-${workspace.nextPaneId}`,
-    };
+export const expandPane = expandTab;
 
-    return {
-      ...workspace,
-      selectedPaneId: pane.id,
-      selectedTopic: topic,
-      nextPaneId: workspace.nextPaneId + 1,
-      panes: [pane],
-    };
+export function restoreExpandedGroup(workspace: WorkspaceState): WorkspaceState {
+  if (workspace.expandedGroupId === null) {
+    return workspace;
   }
 
-  return updatePane(
-    { ...workspace, selectedTopic: topic },
-    paneId,
-    (pane) => ({
-      ...createEmptyPane(pane.id),
-      topic,
-      consumerGroup: `milena-preview-${pane.id}`,
-    }),
-  );
+  return withCompatibility({
+    ...workspace,
+    expandedGroupId: null,
+  });
 }
+
+export const restoreExpandedPane = restoreExpandedGroup;
 
 export function openTopicInWorkspace(
   workspace: WorkspaceState,
   topic: string,
   placement: TopicOpenPlacement,
 ): TopicOpenResult {
-  if (workspace.panes.length === 0) {
-    return {
-      status: "opened",
-      workspace: assignTopicToPane(workspace, workspace.selectedPaneId, topic),
-    };
-  }
-
-  const targetPane = getSelectedPane(workspace);
-  if (!targetPane) {
-    return {
-      status: "missing-target",
-      workspace,
-    };
-  }
-
   if (placement === "selected") {
+    return openTopicInFocusedGroup(workspace, topic);
+  }
+
+  const opened = openTopicInFocusedGroup(workspace, topic);
+  if (opened.status !== "opened") {
+    return opened;
+  }
+
+  const moved = moveTabToAdjacentGroup(
+    opened.workspace,
+    opened.workspace.selectedPaneId,
+    normalizeMoveDirection(placement),
+  );
+
+  if (moved.status === "moved") {
+    return { status: "opened", workspace: moved.workspace };
+  }
+
+  if (
+    moved.status === "group-limit" ||
+    moved.status === "tab-limit" ||
+    moved.status === "missing-target"
+  ) {
+    return { status: moved.status, workspace };
+  }
+
+  return { status: "missing-target", workspace };
+}
+
+export function openTopicInFocusedGroup(
+  workspace: WorkspaceState,
+  topic: string,
+): TopicOpenResult {
+  if (workspace.groups.length === 0) {
+    const groupId = workspace.nextGroupId;
+    const tab = createTopicTab(workspace, topic);
+
     return {
       status: "opened",
-      workspace: assignTopicToPane(workspace, targetPane.id, topic),
+      workspace: withCompatibility({
+        ...workspace,
+        groups: [{ id: groupId, activeTabId: tab.id, tabs: [tab] }],
+        focusedGroupId: groupId,
+        selectedTopic: topic,
+        nextGroupId: groupId + 1,
+        nextTabId: tab.id + 1,
+      }),
     };
   }
 
-  if (workspace.panes.length >= 4) {
-    return {
-      status: "pane-limit",
-      workspace,
-    };
+  const focusedGroup = getFocusedGroup(workspace);
+  if (!focusedGroup) {
+    return { status: "missing-target", workspace };
   }
 
-  const split = splitPane(workspace, targetPane.id, placement);
-  if (split === workspace) {
-    return {
-      status: "missing-target",
-      workspace,
-    };
+  if (focusedGroup.tabs.length >= MAX_TABS_PER_GROUP) {
+    return { status: "tab-limit", workspace };
   }
+
+  const tab = createTopicTab(workspace, topic);
+  const groups = workspace.groups.map((group) =>
+    group.id === focusedGroup.id
+      ? { ...group, activeTabId: tab.id, tabs: [...group.tabs, tab] }
+      : group,
+  );
 
   return {
     status: "opened",
-    workspace: assignTopicToPane(split, split.selectedPaneId, topic),
+    workspace: withCompatibility({
+      ...workspace,
+      groups,
+      focusedGroupId: focusedGroup.id,
+      selectedTopic: topic,
+      nextTabId: tab.id + 1,
+    }),
+  };
+}
+
+export function assignTopicToTab(
+  workspace: WorkspaceState,
+  tabId: number,
+  topic: string,
+): WorkspaceState {
+  if (workspace.groups.length === 0) {
+    return openTopicInFocusedGroup(workspace, topic).workspace;
+  }
+
+  const location = findTabLocation(workspace, tabId);
+  if (!location) {
+    return workspace;
+  }
+
+  const title = nextTopicTitle(workspace, topic, tabId);
+  return updateTab(
+    selectTab(selectTopicPreview(workspace, topic), tabId),
+    tabId,
+    (tab) => ({
+      ...createEmptyTab(tab.id),
+      topic,
+      title,
+      consumerGroup: `milena-preview-${tab.id}`,
+    }),
+  );
+}
+
+export const assignTopicToPane = assignTopicToTab;
+
+export function moveActiveTabToGroup(
+  workspace: WorkspaceState,
+  direction: TabMoveDirection,
+): WorkspaceActionResult {
+  const activeTab = getActiveTab(workspace);
+  if (!activeTab) {
+    return { status: "missing-target", workspace };
+  }
+
+  return moveTabToAdjacentGroup(workspace, activeTab.id, direction);
+}
+
+export function moveTabToAdjacentGroup(
+  workspace: WorkspaceState,
+  tabId: number,
+  direction: TabMoveDirection,
+): WorkspaceActionResult {
+  const location = findTabLocation(workspace, tabId);
+  if (!location) {
+    return { status: "missing-target", workspace };
+  }
+
+  const targetIndex = location.groupIndex + 1;
+  const existingTarget = workspace.groups[targetIndex];
+  if (existingTarget && existingTarget.tabs.length >= MAX_TABS_PER_GROUP) {
+    return { status: "tab-limit", workspace };
+  }
+
+  if (!existingTarget && workspace.groups.length >= MAX_GROUPS) {
+    return { status: "group-limit", workspace };
+  }
+
+  const movingTab = location.tab;
+  const sourceTabs = location.group.tabs.filter((tab) => tab.id !== tabId);
+  const sourceActiveTabId = nearestActiveTabId(
+    location.group.tabs,
+    location.tabIndex,
+  );
+  const nextGroupId = existingTarget
+    ? workspace.nextGroupId
+    : workspace.nextGroupId + 1;
+  const targetGroup =
+    existingTarget ??
+    ({
+      id: workspace.nextGroupId,
+      activeTabId: movingTab.id,
+      tabs: [],
+    } satisfies WorkspaceGroup);
+
+  const groups = workspace.groups.flatMap((group, index) => {
+    if (index === location.groupIndex) {
+      return sourceTabs.length > 0
+        ? [{ ...group, tabs: sourceTabs, activeTabId: sourceActiveTabId }]
+        : [];
+    }
+
+    if (group.id === targetGroup.id) {
+      return [
+        {
+          ...group,
+          tabs: [...group.tabs, movingTab],
+          activeTabId: movingTab.id,
+        },
+      ];
+    }
+
+    return [group];
+  });
+
+  if (!existingTarget) {
+    const insertIndex =
+      sourceTabs.length > 0 ? location.groupIndex + 1 : location.groupIndex;
+    groups.splice(insertIndex, 0, {
+      ...targetGroup,
+      tabs: [movingTab],
+      activeTabId: movingTab.id,
+    });
+  }
+
+  return {
+    status: "moved",
+    workspace: withCompatibility({
+      ...workspace,
+      groups,
+      focusedGroupId: targetGroup.id,
+      selectedTopic: movingTab.topic,
+      nextGroupId,
+      expandedGroupId:
+        workspace.expandedGroupId !== null &&
+        groups.some((group) => group.id === workspace.expandedGroupId)
+          ? workspace.expandedGroupId
+          : null,
+    }),
   };
 }
 
@@ -223,32 +446,58 @@ export function splitPane(
   paneId: number,
   direction: SplitDirection,
 ): WorkspaceState {
-  if (workspace.panes.length >= 4) {
-    return workspace;
+  const result = moveTabToAdjacentGroup(
+    workspace,
+    paneId,
+    normalizeMoveDirection(direction),
+  );
+
+  return result.status === "moved" ? result.workspace : workspace;
+}
+
+export function closeTab(
+  workspace: WorkspaceState,
+  tabId: number,
+): WorkspaceActionResult {
+  const location = findTabLocation(workspace, tabId);
+  if (!location) {
+    return { status: "missing-target", workspace };
   }
 
-  const targetIndex = workspace.panes.findIndex((pane) => pane.id === paneId);
-  if (targetIndex === -1) {
-    return workspace;
-  }
+  const sourceTabs = location.group.tabs.filter((tab) => tab.id !== tabId);
+  const activeTabId = nearestActiveTabId(location.group.tabs, location.tabIndex);
+  const groups = workspace.groups.flatMap((group) => {
+    if (group.id !== location.group.id) {
+      return [group];
+    }
 
-  const newPane = createEmptyPane(workspace.nextPaneId);
-  const nextPanes = [...workspace.panes];
-  const insertIndex = direction === "top" ? targetIndex : targetIndex + 1;
-  nextPanes.splice(insertIndex, 0, newPane);
-
-  let nextPaneId = workspace.nextPaneId + 1;
-  if (nextPanes.length === 3) {
-    nextPanes.push(createEmptyPane(nextPaneId));
-    nextPaneId += 1;
-  }
+    return sourceTabs.length > 0
+      ? [{ ...group, tabs: sourceTabs, activeTabId }]
+      : [];
+  });
+  const focusedGroupId =
+    groups.find((group) => group.id === workspace.focusedGroupId)?.id ??
+    groups[Math.max(0, location.groupIndex - 1)]?.id ??
+    groups[0]?.id ??
+    0;
+  const focusedGroup = groups.find((group) => group.id === focusedGroupId);
+  const activeTab = focusedGroup?.tabs.find(
+    (tab) => tab.id === focusedGroup.activeTabId,
+  );
 
   return {
-    ...workspace,
-    layout: deriveLayout(nextPanes.length, direction),
-    selectedPaneId: newPane.id,
-    nextPaneId,
-    panes: nextPanes,
+    status: "closed",
+    workspace: withCompatibility({
+      ...workspace,
+      groups,
+      focusedGroupId,
+      expandedGroupId:
+        workspace.expandedGroupId !== null &&
+        groups.some((group) => group.id === workspace.expandedGroupId)
+          ? workspace.expandedGroupId
+          : null,
+      selectedTopic: activeTab?.topic ?? null,
+    }),
   };
 }
 
@@ -256,60 +505,149 @@ export function closePane(
   workspace: WorkspaceState,
   paneId: number,
 ): WorkspaceState {
-  if (!workspace.panes.some((pane) => pane.id === paneId)) {
-    return workspace;
+  const result = closeTab(workspace, paneId);
+  return result.status === "closed" ? result.workspace : workspace;
+}
+
+export type WorkspaceGroupLayoutInput = {
+  id?: number | null;
+  activeTabId?: number | null;
+  tabIds: number[];
+};
+
+export type WorkspaceGroupLayoutResult = {
+  status: "applied" | "rejected";
+  workspace: WorkspaceState;
+};
+
+export function applyWorkspaceGroupLayout(
+  workspace: WorkspaceState,
+  groupInputs: WorkspaceGroupLayoutInput[],
+  focusedGroupId?: number | null,
+  activeTabId?: number | null,
+): WorkspaceGroupLayoutResult {
+  const currentTabs = workspace.groups.flatMap((group) => group.tabs);
+  const tabsById = new Map(currentTabs.map((tab) => [tab.id, tab]));
+  const seenTabIds = new Set<number>();
+  const requestedTabIds = groupInputs.flatMap((group) => group.tabIds);
+
+  if (requestedTabIds.length !== currentTabs.length) {
+    return { status: "rejected", workspace };
   }
 
-  const remainingPanes = workspace.panes.filter((pane) => pane.id !== paneId);
-  const usefulPanes = remainingPanes.filter((pane) => !isPaneEmpty(pane));
-  const panes = usefulPanes.length > 0 ? usefulPanes : remainingPanes;
-  const selectedPaneId =
-    panes.find((pane) => pane.id === workspace.selectedPaneId)?.id ??
-    panes[0]?.id ??
-    0;
-  const selectedPane = panes.find((pane) => pane.id === selectedPaneId);
+  for (const tabId of requestedTabIds) {
+    if (seenTabIds.has(tabId) || !tabsById.has(tabId)) {
+      return { status: "rejected", workspace };
+    }
+    seenTabIds.add(tabId);
+  }
+
+  const currentGroupIds = new Set(workspace.groups.map((group) => group.id));
+  const usedGroupIds = new Set<number>();
+  let nextGroupId = workspace.nextGroupId;
+  const groups: WorkspaceGroup[] = [];
+
+  for (const input of groupInputs) {
+    const tabs = input.tabIds
+      .map((tabId) => tabsById.get(tabId))
+      .filter((tab): tab is WorkspaceTab => tab !== undefined);
+    if (tabs.length === 0) {
+      continue;
+    }
+
+    const requestedGroupId =
+      input.id && currentGroupIds.has(input.id) && !usedGroupIds.has(input.id)
+        ? input.id
+        : null;
+    const groupId = requestedGroupId ?? nextGroupId;
+    if (requestedGroupId === null) {
+      nextGroupId += 1;
+    }
+    usedGroupIds.add(groupId);
+
+    const preferredActiveTabId =
+      input.activeTabId && tabs.some((tab) => tab.id === input.activeTabId)
+        ? input.activeTabId
+        : activeTabId && tabs.some((tab) => tab.id === activeTabId)
+          ? activeTabId
+          : tabs[0].id;
+
+    groups.push({
+      id: groupId,
+      activeTabId: preferredActiveTabId,
+      tabs,
+    });
+  }
+
+  const focusedGroup =
+    (focusedGroupId
+      ? groups.find((group) => group.id === focusedGroupId)
+      : undefined) ??
+    (activeTabId
+      ? groups.find((group) => group.tabs.some((tab) => tab.id === activeTabId))
+      : undefined) ??
+    groups[0];
+  const focusedTab =
+    focusedGroup?.tabs.find((tab) => tab.id === focusedGroup.activeTabId) ??
+    focusedGroup?.tabs[0];
+  const nextExpandedGroupId =
+    workspace.expandedGroupId !== null &&
+    groups.some((group) => group.id === workspace.expandedGroupId)
+      ? workspace.expandedGroupId
+      : null;
+  const nextSelectedTopic = focusedTab?.topic ?? null;
+
+  if (
+    workspaceGroupLayoutEquals(workspace.groups, groups) &&
+    workspace.focusedGroupId === (focusedGroup?.id ?? 0) &&
+    workspace.expandedGroupId === nextExpandedGroupId &&
+    workspace.selectedTopic === nextSelectedTopic &&
+    workspace.nextGroupId === Math.max(nextGroupId, workspace.nextGroupId)
+  ) {
+    return { status: "applied", workspace };
+  }
 
   return {
-    ...workspace,
-    layout: normalizeLayout(panes.length),
-    selectedPaneId,
-    expandedPaneId:
-      workspace.expandedPaneId !== null &&
-      panes.some((pane) => pane.id === workspace.expandedPaneId)
-        ? workspace.expandedPaneId
-        : null,
-    selectedTopic: selectedPane?.topic ?? null,
-    panes,
+    status: "applied",
+    workspace: withCompatibility({
+      ...workspace,
+      groups,
+      focusedGroupId: focusedGroup?.id ?? 0,
+      expandedGroupId: nextExpandedGroupId,
+      selectedTopic: nextSelectedTopic,
+      nextGroupId: Math.max(nextGroupId, workspace.nextGroupId),
+    }),
   };
 }
 
-export function stopPane(
+export function stopTab(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
 ): WorkspaceState {
-  return updatePane(workspace, paneId, (pane) => ({
-    ...pane,
+  return updateTab(workspace, tabId, (tab) => ({
+    ...tab,
     mode: "idle",
     status: "idle",
     session: null,
     error: null,
-    activity: [],
     tone: "normal",
   }));
 }
 
-export function markPaneLoading(
+export const stopPane = stopTab;
+
+export function markTabLoading(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
   mode: TopicSessionPreviewRequest["mode"],
 ): WorkspaceState {
-  const pane = workspace.panes.find((candidate) => candidate.id === paneId);
-  if (!canStartPaneSession(pane)) {
+  const tab = findTab(workspace, tabId);
+  if (!canStartTabSession(tab)) {
     return workspace;
   }
 
-  return updatePane(selectPane(workspace, paneId), paneId, (currentPane) => ({
-    ...currentPane,
+  return updateTab(selectTab(workspace, tabId), tabId, (currentTab) => ({
+    ...currentTab,
     mode,
     status: "loading",
     error: null,
@@ -318,78 +656,119 @@ export function markPaneLoading(
   }));
 }
 
-export function appendPaneActivity(
+export const markPaneLoading = markTabLoading;
+
+export function appendTabActivity(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
   event: MilenaBoundaryEvent,
   limit = MAX_PANE_ACTIVITY,
 ): WorkspaceState {
-  return updatePane(workspace, paneId, (pane) => {
-    if (!shouldAppendPaneEvent(pane, event)) {
-      return pane;
+  return updateTab(workspace, tabId, (tab) => {
+    if (!shouldAppendTabEvent(tab, event)) {
+      return tab;
     }
 
     return {
-      ...pane,
-      activity: [event, ...pane.activity].slice(0, limit),
+      ...tab,
+      activity: [event, ...tab.activity].slice(0, limit),
     };
   });
 }
 
-export function clearPaneActivity(
+export const appendPaneActivity = appendTabActivity;
+
+export function clearTabActivity(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
 ): WorkspaceState {
-  return updatePane(workspace, paneId, (pane) => ({
-    ...pane,
+  return updateTab(workspace, tabId, (tab) => ({
+    ...tab,
     activity: [],
   }));
 }
 
-export function markPaneReady(
+export const clearPaneActivity = clearTabActivity;
+
+export function markTabReady(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
   session: TopicSessionPreview,
 ): WorkspaceState {
-  return updatePane(workspace, paneId, (pane) => ({
-    ...pane,
+  return updateTab(workspace, tabId, (tab) => ({
+    ...tab,
     session,
     status: "ready",
     mode: session.mode,
   }));
 }
 
-export function markPanePollingStarting(
+export const markPaneReady = markTabReady;
+
+export function markTabPollingStarting(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
   topic: string,
+  consumerGroup: string | null = null,
 ): WorkspaceState {
-  if (!workspace.panes.some((pane) => pane.id === paneId)) {
-    const id = paneId > 0 ? paneId : workspace.nextPaneId;
-    const pane: WorkspacePane = {
-      ...createEmptyPane(id),
+  if (!findTab(workspace, tabId)) {
+    if (workspace.groups.length === 0) {
+      const tab: WorkspaceTab = {
+        ...createEmptyTab(tabId > 0 ? tabId : workspace.nextTabId),
+        topic,
+        title: nextTopicTitle(workspace, topic),
+        consumerGroup,
+        mode: "poll",
+        status: "loading",
+      };
+      const groupId = workspace.nextGroupId;
+
+      return withCompatibility({
+        ...workspace,
+        groups: [{ id: groupId, activeTabId: tab.id, tabs: [tab] }],
+        focusedGroupId: groupId,
+        selectedTopic: topic,
+        nextGroupId: groupId + 1,
+        nextTabId: Math.max(workspace.nextTabId, tab.id + 1),
+      });
+    }
+
+    const focusedGroup = getFocusedGroup(workspace);
+    if (!focusedGroup || focusedGroup.tabs.length >= MAX_TABS_PER_GROUP) {
+      return workspace;
+    }
+
+    const tab: WorkspaceTab = {
+      ...createEmptyTab(tabId > 0 ? tabId : workspace.nextTabId),
       topic,
+      title: nextTopicTitle(workspace, topic),
+      consumerGroup,
       mode: "poll",
       status: "loading",
     };
+    const groups = workspace.groups.map((group) =>
+      group.id === focusedGroup.id
+        ? { ...group, activeTabId: tab.id, tabs: [...group.tabs, tab] }
+        : group,
+    );
 
-    return {
+    return withCompatibility({
       ...workspace,
-      layout: deriveLayout(workspace.panes.length + 1, "right"),
-      selectedPaneId: id,
+      groups,
+      focusedGroupId: focusedGroup.id,
       selectedTopic: topic,
-      nextPaneId: Math.max(workspace.nextPaneId, id + 1),
-      panes: [...workspace.panes, pane],
-    };
+      nextTabId: Math.max(workspace.nextTabId, tab.id + 1),
+    });
   }
 
-  return updatePane(
-    selectPane(selectTopicPreview(workspace, topic), paneId),
-    paneId,
-    (pane) => ({
-      ...pane,
+  return updateTab(
+    selectTab(selectTopicPreview(workspace, topic), tabId),
+    tabId,
+    (tab) => ({
+      ...tab,
       topic,
-      consumerGroup: null,
+      title: nextTopicTitle(workspace, topic, tabId),
+      consumerGroup,
       mode: "poll",
       status: "loading",
       session: null,
@@ -400,14 +779,16 @@ export function markPanePollingStarting(
   );
 }
 
-export function markPanePollingStarted(
+export const markPanePollingStarting = markTabPollingStarting;
+
+export function markTabPollingStarted(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
   session: KafkaConsumerSession,
 ): WorkspaceState {
-  return updatePane(workspace, paneId, (pane) => ({
-    ...pane,
-    topic: session.topics[0] ?? pane.topic,
+  return updateTab(workspace, tabId, (tab) => ({
+    ...tab,
+    topic: session.topics[0] ?? tab.topic,
     consumerGroup: session.groupId,
     mode: "poll",
     status: "ready",
@@ -417,65 +798,222 @@ export function markPanePollingStarted(
   }));
 }
 
-export function markPaneError(
+export const markPanePollingStarted = markTabPollingStarted;
+
+export function markTabError(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
   error: string,
 ): WorkspaceState {
-  return updatePane(workspace, paneId, {
+  return updateTab(workspace, tabId, {
     error,
     status: "error",
     tone: "error",
   });
 }
 
-function updatePane(
+export const markPaneError = markTabError;
+
+function createTopicTab(
   workspace: WorkspaceState,
-  paneId: number,
-  update: Partial<WorkspacePane> | ((pane: WorkspacePane) => WorkspacePane),
-): WorkspaceState {
-  let changed = false;
-  const panes = workspace.panes.map((pane) => {
-    if (pane.id !== paneId) {
-      return pane;
-    }
-
-    changed = true;
-    return typeof update === "function" ? update(pane) : { ...pane, ...update };
-  });
-
-  return changed ? { ...workspace, panes } : workspace;
+  topic: string,
+): WorkspaceTab {
+  const id = workspace.nextTabId;
+  return {
+    ...createEmptyTab(id),
+    topic,
+    title: nextTopicTitle(workspace, topic),
+    consumerGroup: `milena-preview-${id}`,
+  };
 }
 
-function normalizeLayout(paneCount: number): WorkspaceLayout {
-  if (paneCount <= 1) {
+function updateTab(
+  workspace: WorkspaceState,
+  tabId: number,
+  update: Partial<WorkspaceTab> | ((tab: WorkspaceTab) => WorkspaceTab),
+): WorkspaceState {
+  let changed = false;
+  const groups = workspace.groups.map((group) => {
+    const tabs = group.tabs.map((tab) => {
+      if (tab.id !== tabId) {
+        return tab;
+      }
+
+      changed = true;
+      return typeof update === "function" ? update(tab) : { ...tab, ...update };
+    });
+
+    return changed && group.tabs.some((tab) => tab.id === tabId)
+      ? { ...group, tabs }
+      : group;
+  });
+
+  return changed ? withCompatibility({ ...workspace, groups }) : workspace;
+}
+
+function findTab(
+  workspace: WorkspaceState,
+  tabId: number,
+): WorkspaceTab | undefined {
+  return findTabLocation(workspace, tabId)?.tab;
+}
+
+function findTabLocation(
+  workspace: WorkspaceState,
+  tabId: number,
+):
+  | {
+      group: WorkspaceGroup;
+      groupIndex: number;
+      tab: WorkspaceTab;
+      tabIndex: number;
+    }
+  | undefined {
+  for (const [groupIndex, group] of workspace.groups.entries()) {
+    const tabIndex = group.tabs.findIndex((tab) => tab.id === tabId);
+    if (tabIndex !== -1) {
+      return {
+        group,
+        groupIndex,
+        tab: group.tabs[tabIndex],
+        tabIndex,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function workspaceGroupLayoutEquals(
+  first: WorkspaceGroup[],
+  second: WorkspaceGroup[],
+): boolean {
+  return (
+    first.length === second.length &&
+    first.every((group, index) => {
+      const other = second[index];
+      return (
+        other !== undefined &&
+        group.id === other.id &&
+        group.activeTabId === other.activeTabId &&
+        group.tabs.length === other.tabs.length &&
+        group.tabs.every((tab, tabIndex) => tab.id === other.tabs[tabIndex]?.id)
+      );
+    })
+  );
+}
+
+function getGroupActiveTab(
+  groups: WorkspaceGroup[],
+  groupId: number,
+): WorkspaceTab | undefined {
+  const group = groups.find((candidate) => candidate.id === groupId);
+  return group?.tabs.find((tab) => tab.id === group.activeTabId);
+}
+
+function nearestActiveTabId(tabs: WorkspaceTab[], removedIndex: number): number {
+  return tabs[removedIndex - 1]?.id ?? tabs[removedIndex + 1]?.id ?? 0;
+}
+
+function nextTopicTitle(
+  workspace: WorkspaceState,
+  topic: string,
+  replacingTabId?: number,
+): string {
+  const usedSuffixes = new Set<number>();
+  for (const tab of workspace.groups.flatMap((group) => group.tabs)) {
+    if (tab.id === replacingTabId || tab.topic !== topic) {
+      continue;
+    }
+
+    usedSuffixes.add(titleSuffix(tab.title, topic));
+  }
+
+  let suffix = 1;
+  while (usedSuffixes.has(suffix)) {
+    suffix += 1;
+  }
+
+  return suffix === 1 ? topic : `${topic} (${suffix})`;
+}
+
+function titleSuffix(title: string, topic: string): number {
+  if (title === topic) {
+    return 1;
+  }
+
+  const escapedTopic = topic.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = title.match(new RegExp(`^${escapedTopic} \\((\\d+)\\)$`));
+  return match ? Number(match[1]) : 1;
+}
+
+function withCompatibility(
+  workspace: Omit<
+    WorkspaceState,
+    "layout" | "selectedPaneId" | "expandedPaneId" | "nextPaneId" | "panes"
+  > &
+    Partial<
+      Pick<
+        WorkspaceState,
+        "layout" | "selectedPaneId" | "expandedPaneId" | "nextPaneId" | "panes"
+      >
+    >,
+): WorkspaceState {
+  const focusedGroup =
+    workspace.groups.find((group) => group.id === workspace.focusedGroupId) ??
+    workspace.groups[0];
+  const activeTab =
+    focusedGroup?.tabs.find((tab) => tab.id === focusedGroup.activeTabId) ??
+    focusedGroup?.tabs[0];
+  const expandedGroup = workspace.expandedGroupId
+    ? workspace.groups.find((group) => group.id === workspace.expandedGroupId)
+    : undefined;
+
+  return {
+    ...workspace,
+    layout: normalizeLayout(workspace.groups.length),
+    selectedPaneId: activeTab?.id ?? 0,
+    expandedPaneId:
+      expandedGroup?.activeTabId ??
+      (workspace.expandedGroupId === null ? null : activeTab?.id ?? null),
+    nextPaneId: workspace.nextTabId,
+    panes: workspace.groups.flatMap((group) => group.tabs),
+  };
+}
+
+function normalizeLayout(groupCount: number): WorkspaceLayout {
+  if (groupCount <= 1) {
     return "single";
   }
 
-  if (paneCount === 2) {
+  if (groupCount === 2) {
     return "two-right";
   }
 
   return "quad";
 }
 
-function shouldAppendPaneEvent(
-  pane: WorkspacePane,
+function normalizeMoveDirection(direction: SplitDirection): TabMoveDirection {
+  return direction === "bottom" ? "bottom" : "right";
+}
+
+function shouldAppendTabEvent(
+  tab: WorkspaceTab,
   event: MilenaBoundaryEvent,
 ): boolean {
-  if (pane.status === "idle") {
+  if (tab.status === "idle") {
     return false;
   }
 
-  const eventSessionId = paneEventSessionId(event);
-  if (pane.session?.sessionId && eventSessionId) {
-    return pane.session.sessionId === eventSessionId;
+  const eventSessionId = tabEventSessionId(event);
+  if (tab.session?.sessionId && eventSessionId) {
+    return tab.session.sessionId === eventSessionId;
   }
 
   return true;
 }
 
-function paneEventSessionId(event: MilenaBoundaryEvent): string | null {
+function tabEventSessionId(event: MilenaBoundaryEvent): string | null {
   switch (event.event) {
     case "boundaryOpened":
     case "kafkaConsumerStarted":
@@ -487,19 +1025,4 @@ function paneEventSessionId(event: MilenaBoundaryEvent): string | null {
     case "kafkaRecord":
       return event.data.record.sessionId;
   }
-}
-
-function deriveLayout(
-  paneCount: number,
-  direction: SplitDirection,
-): WorkspaceLayout {
-  if (paneCount === 1) {
-    return "single";
-  }
-
-  if (paneCount === 2) {
-    return direction === "right" ? "two-right" : "two-top";
-  }
-
-  return "quad";
 }
