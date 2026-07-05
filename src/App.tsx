@@ -5,8 +5,11 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
@@ -154,6 +157,7 @@ import {
   reconcileDockviewSnapshot,
   snapshotDockviewApi,
   toDockviewPanelId,
+  type DockviewReconcileResult,
   type DockviewWorkspaceSnapshot,
 } from "./lib/dockviewWorkspace";
 import {
@@ -192,6 +196,28 @@ type VisibleColumns = {
   topics: boolean;
   inspector: boolean;
 };
+
+type RailColumn = keyof VisibleColumns;
+
+type RailWidths = Record<RailColumn, number>;
+
+type RailResizeState = {
+  column: RailColumn;
+  pointerId: number;
+  startX: number;
+  startWidth: number;
+};
+
+const RAIL_WIDTH_LIMITS: Record<
+  RailColumn,
+  { min: number; max: number; default: number }
+> = {
+  topics: { min: 260, max: 480, default: 340 },
+  inspector: { min: 240, max: 420, default: 280 },
+};
+
+const RAIL_RESIZE_STEP = 16;
+const RAIL_RESIZE_LARGE_STEP = 40;
 
 type DockviewPlacementHint = {
   tabId: number;
@@ -1258,13 +1284,22 @@ export function WorkspaceShell({
     topics: true,
     inspector: true,
   });
+  const [railWidths, setRailWidths] = useState<RailWidths>(() => ({
+    topics: RAIL_WIDTH_LIMITS.topics.default,
+    inspector: RAIL_WIDTH_LIMITS.inspector.default,
+  }));
   const requestedTopicLoads = useRef(new Set<string>());
   const workspaceRef = useRef(workspace);
   const workspaceGeneration = useRef(0);
   const pollingRuns = useRef(new Map<number, number>());
   const dockviewPlacementHint = useRef<DockviewPlacementHint>(null);
+  const railResize = useRef<RailResizeState | null>(null);
   const currentAppearancePreference =
     appearancePreference ?? localAppearancePreference;
+  const shellStyle = {
+    "--topics-rail-width": `${railWidths.topics}px`,
+    "--inspector-rail-width": `${railWidths.inspector}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     document.title = APP_SHELL_NAME;
@@ -1638,6 +1673,99 @@ export function WorkspaceShell({
     }));
   }
 
+  function setRailWidth(column: RailColumn, width: number) {
+    const nextWidth = clampRailWidth(column, width);
+    setRailWidths((current) =>
+      current[column] === nextWidth
+        ? current
+        : {
+            ...current,
+            [column]: nextWidth,
+          },
+    );
+  }
+
+  function startRailResize(
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) {
+    event.preventDefault();
+    railResize.current = {
+      column,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: railWidths[column],
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function updateRailResize(
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) {
+    const current = railResize.current;
+    if (
+      !current ||
+      current.column !== column ||
+      current.pointerId !== event.pointerId
+    ) {
+      return;
+    }
+
+    const delta = event.clientX - current.startX;
+    setRailWidth(
+      column,
+      column === "topics"
+        ? current.startWidth + delta
+        : current.startWidth - delta,
+    );
+  }
+
+  function stopRailResize(
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) {
+    const current = railResize.current;
+    if (
+      !current ||
+      current.column !== column ||
+      current.pointerId !== event.pointerId
+    ) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    railResize.current = null;
+  }
+
+  function resizeRailByKeyboard(
+    column: RailColumn,
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) {
+    const step = event.shiftKey ? RAIL_RESIZE_LARGE_STEP : RAIL_RESIZE_STEP;
+    const currentWidth = railWidths[column];
+    let nextWidth: number | null = null;
+
+    if (event.key === "ArrowRight") {
+      nextWidth = column === "topics" ? currentWidth + step : currentWidth - step;
+    } else if (event.key === "ArrowLeft") {
+      nextWidth = column === "topics" ? currentWidth - step : currentWidth + step;
+    } else if (event.key === "Home") {
+      nextWidth = RAIL_WIDTH_LIMITS[column].min;
+    } else if (event.key === "End") {
+      nextWidth = RAIL_WIDTH_LIMITS[column].max;
+    }
+
+    if (nextWidth === null) {
+      return;
+    }
+
+    event.preventDefault();
+    setRailWidth(column, nextWidth);
+  }
+
   function changeAppearancePreference(preference: AppearancePreference) {
     if (appearancePreference === undefined) {
       writeAppearancePreference(preference);
@@ -1684,9 +1812,20 @@ export function WorkspaceShell({
       ]
         .filter(Boolean)
         .join(" ")}
+      style={shellStyle}
     >
       {visibleColumns.topics ? (
         <aside className="rail rail-left" aria-label="Kafka topics">
+          <RailResizeHandle
+            column="topics"
+            width={railWidths.topics}
+            onKeyDown={resizeRailByKeyboard}
+            onPointerCancel={stopRailResize}
+            onPointerDown={startRailResize}
+            onPointerLostCapture={stopRailResize}
+            onPointerMove={updateRailResize}
+            onPointerUp={stopRailResize}
+          />
           <header className="rail-header">
             <div className="rail-title">
               <strong>{APP_SHELL_NAME}</strong>
@@ -1868,10 +2007,15 @@ export function WorkspaceShell({
             }));
           }}
           onDockviewSnapshot={(snapshot) => {
-            updateWorkspace((current) => {
-              const result = reconcileDockviewSnapshot(current, snapshot);
-              return result.status === "applied" ? result.workspace : current;
-            });
+            const result = reconcileDockviewSnapshot(
+              workspaceRef.current,
+              snapshot,
+            );
+            if (result.status === "applied") {
+              workspaceRef.current = result.workspace;
+              setWorkspace(result.workspace);
+            }
+            return result;
           }}
           onMoveTab={moveTab}
           onExpandGroup={expandGroup}
@@ -1908,6 +2052,18 @@ export function WorkspaceShell({
           onAppearancePreferenceChange={changeAppearancePreference}
           onClearActivity={clearActivityLog}
           onHideInspector={() => setColumnVisibility("inspector", false)}
+          resizeHandle={
+            <RailResizeHandle
+              column="inspector"
+              width={railWidths.inspector}
+              onKeyDown={resizeRailByKeyboard}
+              onPointerCancel={stopRailResize}
+              onPointerDown={startRailResize}
+              onPointerLostCapture={stopRailResize}
+              onPointerMove={updateRailResize}
+              onPointerUp={stopRailResize}
+            />
+          }
         />
       ) : null}
       {topicMenu ? (
@@ -1921,6 +2077,75 @@ export function WorkspaceShell({
   );
 }
 
+type RailResizeHandleProps = {
+  column: RailColumn;
+  width: number;
+  onKeyDown: (
+    column: RailColumn,
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => void;
+  onPointerCancel: (
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
+  onPointerDown: (
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
+  onPointerLostCapture: (
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
+  onPointerMove: (
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
+  onPointerUp: (
+    column: RailColumn,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
+};
+
+function RailResizeHandle({
+  column,
+  width,
+  onKeyDown,
+  onPointerCancel,
+  onPointerDown,
+  onPointerLostCapture,
+  onPointerMove,
+  onPointerUp,
+}: RailResizeHandleProps) {
+  const limit = RAIL_WIDTH_LIMITS[column];
+  const label =
+    column === "topics" ? "Resize topic sidebar" : "Resize inspector column";
+
+  return (
+    <div
+      className={`rail-resize-handle is-${column}`}
+      role="separator"
+      aria-label={label}
+      aria-orientation="vertical"
+      aria-valuemin={limit.min}
+      aria-valuemax={limit.max}
+      aria-valuenow={width}
+      tabIndex={0}
+      title={label}
+      onKeyDown={(event) => onKeyDown(column, event)}
+      onLostPointerCapture={(event) => onPointerLostCapture(column, event)}
+      onPointerCancel={(event) => onPointerCancel(column, event)}
+      onPointerDown={(event) => onPointerDown(column, event)}
+      onPointerMove={(event) => onPointerMove(column, event)}
+      onPointerUp={(event) => onPointerUp(column, event)}
+    />
+  );
+}
+
+function clampRailWidth(column: RailColumn, width: number) {
+  const limit = RAIL_WIDTH_LIMITS[column];
+  return Math.min(limit.max, Math.max(limit.min, Math.round(width)));
+}
+
 type DockviewWorkspaceProps = {
   workspace: WorkspaceState;
   placementHintRef: MutableRefObject<DockviewPlacementHint>;
@@ -1929,7 +2154,9 @@ type DockviewWorkspaceProps = {
   environmentKey: string;
   renderPreferences: MessageRenderPreferences;
   onActivateTab: (tab: WorkspacePane) => void;
-  onDockviewSnapshot: (snapshot: DockviewWorkspaceSnapshot) => void;
+  onDockviewSnapshot: (
+    snapshot: DockviewWorkspaceSnapshot,
+  ) => DockviewReconcileResult;
   onMoveTab: (tabId: number, direction: TabMoveDirection) => void;
   onExpandGroup: (groupId: number) => void;
   onRestoreGroup: () => void;
@@ -2042,7 +2269,10 @@ function DockviewWorkspace({
         return;
       }
 
-      dockviewCallbacks.current.onDockviewSnapshot(snapshotDockviewApi(event.api));
+      const result = dockviewCallbacks.current.onDockviewSnapshot(
+        snapshotDockviewApi(event.api),
+      );
+      pruneRejectedDockviewSnapshot(event.api, result, syncingDockview);
     };
     dockviewSubscriptions.current = [
       event.api.onDidRemovePanel((panel) => {
@@ -2055,8 +2285,11 @@ function DockviewWorkspace({
           dockviewCallbacks.current.onClose(tabId);
         }
       }),
+      event.api.onDidActivePanelChange(syncFromDockview),
+      event.api.onDidActiveGroupChange(syncFromDockview),
       event.api.onDidMovePanel(syncFromDockview),
       event.api.onDidDrop(syncFromDockview),
+      event.api.onDidMaximizedGroupChange(syncFromDockview),
     ];
     setDockviewReadyTick((tick) => tick + 1);
   }, []);
@@ -2118,6 +2351,38 @@ function DockviewWorkspace({
       />
     </section>
   );
+}
+
+function pruneRejectedDockviewSnapshot(
+  api: DockviewApi,
+  result: DockviewReconcileResult,
+  syncingDockview: MutableRefObject<boolean>,
+) {
+  if (
+    result.prunePanelIds.length === 0 &&
+    result.rejectedGroupIds.length === 0
+  ) {
+    return;
+  }
+
+  syncingDockview.current = true;
+  try {
+    for (const panelId of result.prunePanelIds) {
+      const panel = api.getPanel(panelId);
+      if (panel) {
+        api.removePanel(panel);
+      }
+    }
+
+    for (const groupId of result.rejectedGroupIds) {
+      const group = api.getGroup(groupId);
+      if (group) {
+        api.removeGroup(group);
+      }
+    }
+  } finally {
+    syncingDockview.current = false;
+  }
 }
 
 function DockviewTopicPanel({ params }: IDockviewPanelProps<DockviewPanelParams>) {
@@ -2577,6 +2842,7 @@ export function RightRail({
   onAppearancePreferenceChange = () => undefined,
   onClearActivity,
   onHideInspector = () => undefined,
+  resizeHandle = null,
 }: {
   activePane: WorkspacePane | undefined;
   activity: GlobalActivityEntry[];
@@ -2587,6 +2853,7 @@ export function RightRail({
   onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
   onClearActivity: () => void;
   onHideInspector?: () => void;
+  resizeHandle?: ReactNode;
 }) {
   const tabSummary = formatGroupSummary(paneCount);
   const groupSummary = workspaceContext
@@ -2607,6 +2874,7 @@ export function RightRail({
 
   return (
     <aside className="rail rail-right" aria-label="Activity log">
+      {resizeHandle}
       <header className="rail-header">
         <div className="rail-title">
           <span className="eyebrow">Inspector</span>

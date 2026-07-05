@@ -186,22 +186,23 @@ export function reconcileDockviewSnapshot(
     };
   }
 
-  const activeGroupId =
-    snapshot.activeGroupId && canonicalGroupIds.has(snapshot.activeGroupId)
-      ? fromDockviewGroupId(snapshot.activeGroupId)
-      : null;
   const activePanelId = resolveActivePanelId(snapshot, canonicalPanelIds);
   const activeTabId =
     activePanelId !== null ? fromDockviewPanelId(activePanelId) : null;
+  const resolvedGroups = resolveSnapshotGroups(workspace, snapshot.groups);
+  const activeGroupId = resolveSnapshotActiveGroupId(
+    snapshot.activeGroupId ?? null,
+    resolvedGroups,
+    canonicalGroupIds,
+    activeTabId,
+  );
 
   const layout = applyWorkspaceGroupLayout(
     workspace,
-    snapshot.groups.map((group) => ({
-      id: fromDockviewGroupId(group.id),
+    resolvedGroups.map((group) => ({
+      id: group.workspaceGroupId,
       activeTabId: fromDockviewPanelId(group.activePanelId),
-      tabIds: group.panelIds
-        .map(fromDockviewPanelId)
-        .filter((tabId): tabId is number => tabId !== null),
+      tabIds: group.tabIds,
     })),
     activeGroupId,
     activeTabId,
@@ -324,7 +325,107 @@ function resolveActivePanelId(
   return null;
 }
 
+type ResolvedDockviewSnapshotGroup = DockviewWorkspaceGroup & {
+  workspaceGroupId: number | null;
+  tabIds: number[];
+};
+
+function resolveSnapshotGroups(
+  workspace: WorkspaceState,
+  groups: DockviewWorkspaceGroup[],
+): ResolvedDockviewSnapshotGroup[] {
+  const usedGroupIds = new Set<number>();
+
+  return groups.map((group) => {
+    const tabIds = group.panelIds
+      .map(fromDockviewPanelId)
+      .filter((tabId): tabId is number => tabId !== null);
+    const explicitGroupId = fromDockviewGroupId(group.id);
+    const currentGroup =
+      explicitGroupId !== null &&
+      !usedGroupIds.has(explicitGroupId) &&
+      workspace.groups.some((candidate) => candidate.id === explicitGroupId)
+        ? workspace.groups.find((candidate) => candidate.id === explicitGroupId)
+        : bestWorkspaceGroupMatch(workspace, tabIds, usedGroupIds);
+
+    if (currentGroup) {
+      usedGroupIds.add(currentGroup.id);
+    }
+
+    return {
+      ...group,
+      workspaceGroupId: currentGroup?.id ?? null,
+      tabIds,
+    };
+  });
+}
+
+function bestWorkspaceGroupMatch(
+  workspace: WorkspaceState,
+  tabIds: number[],
+  usedGroupIds: Set<number>,
+): WorkspaceState["groups"][number] | undefined {
+  const candidates = workspace.groups.filter(
+    (group) => !usedGroupIds.has(group.id),
+  );
+  const exactMatch = candidates.find((group) =>
+    sameNumberSet(
+      group.tabs.map((tab) => tab.id),
+      tabIds,
+    ),
+  );
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  let bestMatch:
+    | { group: WorkspaceState["groups"][number]; overlap: number }
+    | null = null;
+  const tabIdSet = new Set(tabIds);
+  for (const group of candidates) {
+    const overlap = group.tabs.filter((tab) => tabIdSet.has(tab.id)).length;
+    if (overlap > 0 && (!bestMatch || overlap > bestMatch.overlap)) {
+      bestMatch = { group, overlap };
+    }
+  }
+
+  return bestMatch?.group;
+}
+
+function resolveSnapshotActiveGroupId(
+  activeGroupId: string | null,
+  groups: ResolvedDockviewSnapshotGroup[],
+  canonicalGroupIds: Set<string>,
+  activeTabId: number | null,
+): number | null {
+  if (activeTabId !== null) {
+    const activeTabGroup = groups.find((group) =>
+      group.tabIds.includes(activeTabId),
+    );
+    if (activeTabGroup?.workspaceGroupId) {
+      return activeTabGroup.workspaceGroupId;
+    }
+  }
+
+  if (activeGroupId && canonicalGroupIds.has(activeGroupId)) {
+    return fromDockviewGroupId(activeGroupId);
+  }
+
+  return (
+    groups.find((group) => group.id === activeGroupId)?.workspaceGroupId ?? null
+  );
+}
+
 function sameStringSet(first: string[], second: string[]): boolean {
+  if (first.length !== second.length) {
+    return false;
+  }
+
+  const values = new Set(first);
+  return second.every((value) => values.has(value));
+}
+
+function sameNumberSet(first: number[], second: number[]): boolean {
   if (first.length !== second.length) {
     return false;
   }

@@ -402,6 +402,40 @@ describe("App renderer flow harness", () => {
     expect(tauri.startKafkaConsumerSession).toHaveBeenCalledOnce();
   });
 
+  it("resizes side rails by dragging their separators and preserves widths when hidden", async () => {
+    const { user } = renderApp();
+
+    const shell = screen.getByRole("main");
+    const topicResize = screen.getByRole("separator", {
+      name: "Resize topic sidebar",
+    });
+    const inspectorResize = screen.getByRole("separator", {
+      name: "Resize inspector column",
+    });
+
+    expect(shell).toHaveStyle({
+      "--topics-rail-width": "340px",
+      "--inspector-rail-width": "280px",
+    });
+
+    fireEvent.pointerDown(topicResize, { clientX: 340, pointerId: 1 });
+    fireEvent.pointerMove(topicResize, { clientX: 520, pointerId: 1 });
+    fireEvent.pointerUp(topicResize, { pointerId: 1 });
+
+    expect(shell).toHaveStyle({ "--topics-rail-width": "480px" });
+
+    fireEvent.pointerDown(inspectorResize, { clientX: 900, pointerId: 2 });
+    fireEvent.pointerMove(inspectorResize, { clientX: 700, pointerId: 2 });
+    fireEvent.pointerUp(inspectorResize, { pointerId: 2 });
+
+    expect(shell).toHaveStyle({ "--inspector-rail-width": "420px" });
+
+    await user.click(screen.getByRole("button", { name: "Hide topic sidebar" }));
+    await user.click(screen.getByRole("button", { name: "Show topic sidebar" }));
+
+    expect(shell).toHaveStyle({ "--topics-rail-width": "480px" });
+  });
+
   it("loads topics only after manual refresh, persists pins, selects topics, and recovers through another refresh", async () => {
     tauri.listKafkaTopics
       .mockRejectedValueOnce(new Error("SASL auth failed"))
@@ -681,6 +715,73 @@ describe("App renderer flow harness", () => {
       "milena-preview-4",
     );
     expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps Dockview tab header activation canonical for previews and future opens", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+
+    await openTopic(user, "orders.created");
+    await openTopic(user, "payments.authorized", "New group right");
+    await user.click(pane("1"));
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Group 1 / 2 groups / 2 tabs",
+    );
+
+    await user.click(dockviewTabHeader("payments.authorized"));
+
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Tab 2");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "payments.authorized",
+    );
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Group 2 / 2 groups / 2 tabs",
+    );
+    expect(topicSelect("payments.authorized").closest(".topic")).toHaveClass(
+      "active",
+    );
+
+    await openTopic(user, "inventory.adjusted");
+
+    expect(pane("3")).toHaveTextContent("inventory.adjusted");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Group 2 / 2 groups / 3 tabs",
+    );
+    expect(topicSelect("inventory.adjusted").closest(".topic")).toHaveClass(
+      "active",
+    );
+  });
+
+  it("exposes Dockview header move controls with the correct disabled state", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+
+    await openTopic(user, "orders.created");
+
+    expect(
+      screen.getByRole("button", { name: "Move tab 1 right" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Move tab 1 bottom" }),
+    ).toBeDisabled();
+
+    await openTopic(user, "payments.authorized");
+
+    const moveRight = screen.getByRole("button", { name: "Move tab 2 right" });
+    expect(moveRight).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Move tab 2 bottom" }),
+    ).not.toBeDisabled();
+
+    await user.click(moveRight);
+
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(2);
+    expect(pane("1")).toHaveTextContent("orders.created");
+    expect(pane("2")).toHaveTextContent("payments.authorized");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Tab 2");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Group 2 / 2 groups / 2 tabs",
+    );
   });
 
   it("enforces the four-pane split limit", async () => {
@@ -1666,6 +1767,17 @@ function createDockviewApiHarness(groupPanelIds: string[][]) {
 
 function dockviewPanelParams(pane: WorkspacePane) {
   return { pane } as never;
+}
+
+function dockviewTabHeader(title: string): HTMLElement {
+  const header = [...document.querySelectorAll(".dv-tab")].find((candidate) =>
+    candidate.textContent?.includes(title),
+  );
+  if (!header) {
+    throw new Error(`Unable to find Dockview tab header for ${title}`);
+  }
+
+  return header as HTMLElement;
 }
 
 function paneRenderProps({

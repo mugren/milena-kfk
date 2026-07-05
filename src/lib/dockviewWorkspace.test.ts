@@ -89,6 +89,34 @@ describe("dockview workspace adapter", () => {
     expect(result.rejectedGroupIds).toEqual([]);
   });
 
+  it("preserves canonical group ids when Dockview reports generated group ids for the same tab sets", () => {
+    const workspace = splitWorkspace();
+
+    const result = reconcileDockviewSnapshot(workspace, {
+      activeGroupId: "dockview-generated-group-2",
+      activePanelId: toDockviewPanelId(2),
+      groups: [
+        {
+          id: "dockview-generated-group-1",
+          activePanelId: toDockviewPanelId(1),
+          panelIds: [toDockviewPanelId(1), toDockviewPanelId(3)],
+        },
+        {
+          id: "dockview-generated-group-2",
+          activePanelId: toDockviewPanelId(2),
+          panelIds: [toDockviewPanelId(2)],
+        },
+      ],
+    });
+
+    expect(result.status).toBe("applied");
+    expect(result.workspace.groups.map((group) => group.id)).toEqual([1, 2]);
+    expect(result.workspace.focusedGroupId).toBe(2);
+    expect(result.workspace.selectedPaneId).toBe(2);
+    expect(result.workspace.selectedTopic).toBe("payments.authorized");
+    expect(result.workspace.nextGroupId).toBe(3);
+  });
+
   it("applies valid Dockview drag layouts while preserving tab state", () => {
     const workspace = splitWorkspace();
 
@@ -99,12 +127,12 @@ describe("dockview workspace adapter", () => {
         {
           id: toDockviewGroupId(1),
           activePanelId: toDockviewPanelId(1),
-          panelIds: [toDockviewPanelId(1), toDockviewPanelId(3)],
+          panelIds: [toDockviewPanelId(1)],
         },
         {
           id: "dockview-generated-group",
           activePanelId: toDockviewPanelId(2),
-          panelIds: [toDockviewPanelId(2)],
+          panelIds: [toDockviewPanelId(3), toDockviewPanelId(2)],
         },
       ],
     });
@@ -115,15 +143,15 @@ describe("dockview workspace adapter", () => {
       id: 1,
       activeTabId: 1,
     });
-    expect(result.workspace.groups[0].tabs.map((tab) => tab.id)).toEqual([1, 3]);
+    expect(result.workspace.groups[0].tabs.map((tab) => tab.id)).toEqual([1]);
     expect(result.workspace.groups[1]).toMatchObject({
-      id: 3,
+      id: 2,
       activeTabId: 2,
     });
-    expect(result.workspace.groups[1].tabs.map((tab) => tab.id)).toEqual([2]);
-    expect(result.workspace.focusedGroupId).toBe(3);
+    expect(result.workspace.groups[1].tabs.map((tab) => tab.id)).toEqual([3, 2]);
+    expect(result.workspace.focusedGroupId).toBe(2);
     expect(result.workspace.selectedPaneId).toBe(2);
-    expect(result.workspace.nextGroupId).toBe(4);
+    expect(result.workspace.nextGroupId).toBe(3);
   });
 
   it("rejects unexpected Dockview groups and panels instead of accepting them into workspace state", () => {
