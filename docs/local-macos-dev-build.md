@@ -7,7 +7,7 @@ for distribution.
 ## Prerequisites
 
 - macOS.
-- Node.js and npm.
+- Node.js 24 LTS and npm.
 - Rust stable toolchain with Cargo.
 - Xcode Command Line Tools.
 - Docker Desktop or another Docker Compose runtime for Kafka smoke checks.

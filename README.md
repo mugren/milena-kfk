@@ -9,7 +9,7 @@ keeping pane-level and global feedback visible.
 
 Prerequisites:
 
-- Node.js and npm
+- Node.js 24 LTS and npm
 - Rust stable toolchain
 - Xcode Command Line Tools
 - Docker Compose for local Kafka smoke checks

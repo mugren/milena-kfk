@@ -214,8 +214,7 @@ describe("App onboarding renderer flow", () => {
   it("saves edited environments without opening a workspace", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: /Staging/ }));
+    await user.click(await stagingEnvironmentButton());
     await user.click(screen.getByRole("button", { name: "Edit" }));
     expect(screen.getByLabelText("Environment name")).toHaveValue("Staging");
     expect(screen.getByLabelText("Environment name")).toBeDisabled();
@@ -252,8 +251,7 @@ describe("App onboarding renderer flow", () => {
       .mockResolvedValueOnce(stagingRuntimeAuth);
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: /Staging/ }));
+    await user.click(await stagingEnvironmentButton());
     await user.click(screen.getByRole("button", { name: "Open" }));
 
     expect(await screen.findByText("keychain secret missing")).toBeVisible();
@@ -281,8 +279,7 @@ describe("App onboarding renderer flow", () => {
   it("opens the selected environment from the chooser with Enter", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: /Staging/ }));
+    await user.click(await stagingEnvironmentButton());
     await user.keyboard("{Enter}");
 
     expect(await screen.findByLabelText("Milena workspace")).toBeVisible();
@@ -294,7 +291,7 @@ describe("App onboarding renderer flow", () => {
   it("keeps Enter as text editing inside advanced properties", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
+    await localDevEnvironmentButton();
     await user.click(screen.getByRole("button", { name: "Add" }));
     await user.type(screen.getByLabelText("Environment name"), "QA");
     await user.type(screen.getByLabelText("Kafka brokers"), "qa.kafka.internal:9094");
@@ -316,8 +313,7 @@ describe("App onboarding renderer flow", () => {
   it("changes environment by resetting workspace activity, stopping sessions, and ignoring stale events", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: /Staging/ }));
+    await user.click(await stagingEnvironmentButton());
     await user.click(screen.getByRole("button", { name: "Open" }));
     expect(await screen.findByLabelText("Milena workspace")).toBeVisible();
     await waitFor(() => expect(topicSelect("orders.created")).toBeVisible());
@@ -344,7 +340,7 @@ describe("App onboarding renderer flow", () => {
 
     expect(await screen.findByLabelText("Environment chooser")).toBeVisible();
     expect(screen.queryByLabelText("Milena workspace")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Staging/ }))
+    expect(await stagingEnvironmentButton())
       .toHaveAttribute("aria-current", "true");
     await waitFor(() =>
       expect(tauri.stopKafkaConsumerSession).toHaveBeenCalledWith({
@@ -387,8 +383,7 @@ describe("App onboarding renderer flow", () => {
     tauri.listKafkaTopics.mockRejectedValueOnce(new Error("SASL auth failed"));
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(await screen.findByRole("button", { name: "Open" }));
 
     expect(await screen.findByLabelText("Milena workspace")).toBeVisible();
     expect(await screen.findAllByText("SASL auth failed")).toHaveLength(2);
@@ -426,8 +421,7 @@ describe("App onboarding renderer flow", () => {
   it("cancels edit forms and delete confirmation with Escape", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: /Staging/ }));
+    await user.click(await stagingEnvironmentButton());
     await user.click(screen.getByRole("button", { name: "Edit" }));
 
     expect(screen.getByLabelText("Edit environment")).toBeVisible();
@@ -529,8 +523,9 @@ describe("App onboarding renderer flow", () => {
     );
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: "Test connection" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Test connection" }),
+    );
 
     expect(await screen.findByText("connection secret missing")).toBeVisible();
     expect(screen.queryByLabelText("Milena workspace")).not.toBeInTheDocument();
@@ -541,8 +536,9 @@ describe("App onboarding renderer flow", () => {
   it("tests a saved environment without opening the workspace", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: "Test connection" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Test connection" }),
+    );
 
     await waitFor(() => expect(tauri.materializeRuntimeAuthConfig).toHaveBeenCalledOnce());
     expect(tauri.materializeRuntimeAuthConfig).toHaveBeenCalledWith("Local Dev");
@@ -565,8 +561,9 @@ describe("App onboarding renderer flow", () => {
   it("opens a tested saved environment without repeating the topic metadata fetch", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: "Test connection" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Test connection" }),
+    );
 
     await waitFor(() => expect(tauri.listKafkaTopics).toHaveBeenCalledOnce());
     expect(await screen.findByText("Connection OK: 5 topics")).toBeVisible();
@@ -584,7 +581,7 @@ describe("App onboarding renderer flow", () => {
   it("tests current add form values through temporary runtime auth without saving", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
+    await localDevEnvironmentButton();
     await user.click(screen.getByRole("button", { name: "Add" }));
     await user.click(screen.getByRole("button", { name: "Test connection" }));
 
@@ -629,7 +626,7 @@ describe("App onboarding renderer flow", () => {
   it("previews and hides the environment form password", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
+    await localDevEnvironmentButton();
     await user.click(screen.getByRole("button", { name: "Add" }));
     await user.selectOptions(screen.getByLabelText("Auth mode"), "saslSslPlain");
 
@@ -650,7 +647,7 @@ describe("App onboarding renderer flow", () => {
   it("tests local compose through SASL_SSL PLAIN credentials", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
+    await localDevEnvironmentButton();
     await user.click(screen.getByRole("button", { name: "Add" }));
     await user.type(screen.getByLabelText("Environment name"), "Local Compose");
     await user.type(screen.getByLabelText("Kafka brokers"), "localhost:19092");
@@ -681,8 +678,7 @@ describe("App onboarding renderer flow", () => {
   it("tests edit form values with a blank SCRAM password through the existing saved secret", async () => {
     const { user } = renderAppChooser();
 
-    await screen.findByLabelText("Environment chooser");
-    await user.click(screen.getByRole("button", { name: /Staging/ }));
+    await user.click(await stagingEnvironmentButton());
     await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.clear(screen.getByLabelText("Kafka brokers"));
     await user.type(screen.getByLabelText("Kafka brokers"), "staging.kafka.internal:9095");
@@ -706,3 +702,11 @@ describe("App onboarding renderer flow", () => {
     expect(queryTopicSelect("orders.created")).not.toBeInTheDocument();
   });
 });
+
+function localDevEnvironmentButton() {
+  return screen.findByRole("button", { name: /Local Dev/ });
+}
+
+function stagingEnvironmentButton() {
+  return screen.findByRole("button", { name: /Staging/ });
+}
