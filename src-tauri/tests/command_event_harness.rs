@@ -289,6 +289,7 @@ fn frontend_facing_json_contracts_round_trip_with_expected_casing() {
     let start_request = StartKafkaConsumerSessionRequest {
         auth: auth.clone(),
         topics: vec!["orders.created".to_string()],
+        group_id: Some("milena-poll-tab-1".to_string()),
         from_beginning: true,
     };
     assert_eq!(
@@ -302,6 +303,7 @@ fn frontend_facing_json_contracts_round_trip_with_expected_casing() {
                 },
             },
             "topics": ["orders.created"],
+            "groupId": "milena-poll-tab-1",
             "fromBeginning": true,
         })
     );

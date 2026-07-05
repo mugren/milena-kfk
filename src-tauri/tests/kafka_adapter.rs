@@ -378,6 +378,7 @@ fn command_boundary_delegates_exact_requests_and_preserves_consumer_flags() {
     let start_request = StartKafkaConsumerSessionRequest {
         auth: auth.clone(),
         topics: vec!["orders.created".to_string()],
+        group_id: None,
         from_beginning: true,
     };
     let session = start_kafka_consumer_session(
@@ -432,6 +433,7 @@ fn command_boundary_propagates_adapter_and_emitter_failures() {
         StartKafkaConsumerSessionRequest {
             auth: auth.clone(),
             topics: vec!["orders.created".to_string()],
+            group_id: None,
             from_beginning: false,
         },
         RecordingBoundaryEventEmitter::default(),
@@ -459,6 +461,7 @@ fn command_boundary_propagates_adapter_and_emitter_failures() {
         StartKafkaConsumerSessionRequest {
             auth,
             topics: vec!["orders.created".to_string()],
+            group_id: None,
             from_beginning: false,
         },
         FailingBoundaryEventEmitter,
@@ -511,6 +514,7 @@ fn native_adapter_preflight_rejects_blank_topics_payload_and_unknown_sessions() 
         StartKafkaConsumerSessionRequest {
             auth: auth.clone(),
             topics: vec![" ".to_string()],
+            group_id: None,
             from_beginning: false,
         },
         RecordingBoundaryEventEmitter::default(),

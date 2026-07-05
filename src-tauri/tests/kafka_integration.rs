@@ -393,6 +393,7 @@ fn failure_scenarios_surface_command_errors_without_hanging() {
             StartKafkaConsumerSessionRequest {
                 auth: settings.auth.clone(),
                 topics: vec![" ".to_string()],
+                group_id: None,
                 from_beginning: false,
             },
             RecordingBoundaryEventEmitter::default(),
@@ -675,6 +676,7 @@ fn start_session(
         StartKafkaConsumerSessionRequest {
             auth: settings.auth.clone(),
             topics: vec![topic],
+            group_id: None,
             from_beginning,
         },
         events.clone(),

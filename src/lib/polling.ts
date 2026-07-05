@@ -7,12 +7,12 @@ import type {
   StopKafkaConsumerSessionResponse,
 } from "./tauri";
 import {
-  appendPaneActivity,
-  closePane,
-  markPaneError,
-  markPanePollingStarted,
-  markPanePollingStarting,
-  stopPane,
+  appendTabActivity,
+  closeTab,
+  markTabError,
+  markTabPollingStarted,
+  markTabPollingStarting,
+  stopTab,
   type WorkspaceState,
 } from "./workspace";
 import { stampKafkaRecordReceivedAt } from "./messages";
@@ -30,10 +30,11 @@ export type WorkspaceUpdate = (
   update: (workspace: WorkspaceState) => WorkspaceState,
 ) => void;
 
-export type PanePollingOptions = {
-  paneId: number;
+export type TabPollingOptions = {
+  tabId: number;
   topic: string;
   auth: RuntimeAuthConfig;
+  consumerGroupId?: string;
   getWorkspace: () => WorkspaceState;
   updateWorkspace: WorkspaceUpdate;
   startConsumerSession: StartConsumerSession;
@@ -45,29 +46,44 @@ export type PanePollingOptions = {
   now?: () => Date;
 };
 
-export type StopPanePollingOptions = {
-  paneId: number;
+export type StopTabPollingOptions = {
+  tabId: number;
   getWorkspace: () => WorkspaceState;
   updateWorkspace: WorkspaceUpdate;
   stopConsumerSession: StopConsumerSession;
   onStopError?: (error: string) => void;
 };
 
+export type PanePollingOptions = Omit<TabPollingOptions, "tabId"> & {
+  paneId: number;
+};
+
+export type StopPanePollingOptions = Omit<StopTabPollingOptions, "tabId"> & {
+  paneId: number;
+};
+
 export function buildLatestOnlyConsumerRequest(
   auth: RuntimeAuthConfig,
   topic: string,
+  groupId?: string,
 ): StartKafkaConsumerSessionRequest {
   return {
     auth,
     topics: [topic],
+    groupId,
     fromBeginning: false,
   };
 }
 
-export async function startPanePollingSession({
-  paneId,
+export function defaultTabConsumerGroup(tabId: number): string {
+  return `milena-poll-tab-${tabId}`;
+}
+
+export async function startTabPollingSession({
+  tabId,
   topic,
   auth,
+  consumerGroupId = defaultTabConsumerGroup(tabId),
   getWorkspace,
   updateWorkspace,
   startConsumerSession,
@@ -77,8 +93,13 @@ export async function startPanePollingSession({
   onError,
   onStopError,
   now = () => new Date(),
-}: PanePollingOptions): Promise<KafkaConsumerSession | null> {
-  const existingSessionId = getPanePollingSessionId(getWorkspace(), paneId);
+}: TabPollingOptions): Promise<KafkaConsumerSession | null> {
+  const tab = getWorkspaceTab(getWorkspace(), tabId);
+  if (tab?.topic !== topic) {
+    return null;
+  }
+
+  const existingSessionId = getTabPollingSessionId(getWorkspace(), tabId);
   if (existingSessionId && stopConsumerSession) {
     await stopConsumerBestEffort(stopConsumerSession, existingSessionId, onStopError);
   }
@@ -87,24 +108,34 @@ export async function startPanePollingSession({
     return null;
   }
 
-  updateWorkspace((current) => markPanePollingStarting(current, paneId, topic));
+  updateWorkspace((current) =>
+    markTabPollingStarting(current, tabId, topic, consumerGroupId),
+  );
 
   try {
     const session = await startConsumerSession(
-      buildLatestOnlyConsumerRequest(auth, topic),
+      buildLatestOnlyConsumerRequest(auth, topic, consumerGroupId),
       (event) => {
-        if (!isCurrent()) {
+        if (
+          !isCurrent() ||
+          !eventBelongsToTabPollingRun(
+            getWorkspace(),
+            tabId,
+            event,
+            consumerGroupId,
+          )
+        ) {
           return;
         }
 
         const receivedEvent = stampKafkaRecordReceivedAt(event, now());
         updateWorkspace((current) => {
-          const next = appendPaneActivity(current, paneId, receivedEvent);
+          const next = appendTabActivity(current, tabId, receivedEvent);
           if (receivedEvent.event !== "kafkaConsumerError") {
             return next;
           }
 
-          return markPaneError(next, paneId, receivedEvent.data.message);
+          return markTabError(next, tabId, receivedEvent.data.message);
         });
         onEvent?.(receivedEvent);
       },
@@ -122,29 +153,63 @@ export async function startPanePollingSession({
     }
 
     updateWorkspace((current) =>
-      markPanePollingStarted(current, paneId, session),
+      markTabPollingStarted(current, tabId, session),
     );
     return session;
   } catch (cause) {
     const message =
       cause instanceof Error ? cause.message : "Kafka consumer session failed";
     if (isCurrent()) {
-      updateWorkspace((current) => markPaneError(current, paneId, message));
+      updateWorkspace((current) => markTabError(current, tabId, message));
       onError?.(message);
     }
     return null;
   }
 }
 
-export async function stopPanePollingSession({
+export async function startPanePollingSession({
   paneId,
+  ...options
+}: PanePollingOptions): Promise<KafkaConsumerSession | null> {
+  return startTabPollingSession({ tabId: paneId, ...options });
+}
+
+export async function stopTabPollingSession({
+  tabId,
   getWorkspace,
   updateWorkspace,
   stopConsumerSession,
   onStopError,
+}: StopTabPollingOptions): Promise<void> {
+  const sessionId = getTabPollingSessionId(getWorkspace(), tabId);
+  updateWorkspace((current) => stopTab(current, tabId));
+
+  if (!sessionId) {
+    return;
+  }
+
+  await stopConsumerBestEffort(stopConsumerSession, sessionId, onStopError);
+}
+
+export async function stopPanePollingSession({
+  paneId,
+  ...options
 }: StopPanePollingOptions): Promise<void> {
-  const sessionId = getPanePollingSessionId(getWorkspace(), paneId);
-  updateWorkspace((current) => stopPane(current, paneId));
+  await stopTabPollingSession({ tabId: paneId, ...options });
+}
+
+export async function closeTabPollingSession({
+  tabId,
+  getWorkspace,
+  updateWorkspace,
+  stopConsumerSession,
+  onStopError,
+}: StopTabPollingOptions): Promise<void> {
+  const sessionId = getTabPollingSessionId(getWorkspace(), tabId);
+  updateWorkspace((current) => {
+    const result = closeTab(current, tabId);
+    return result.status === "closed" ? result.workspace : current;
+  });
 
   if (!sessionId) {
     return;
@@ -155,31 +220,70 @@ export async function stopPanePollingSession({
 
 export async function closePanePollingSession({
   paneId,
-  getWorkspace,
-  updateWorkspace,
-  stopConsumerSession,
-  onStopError,
+  ...options
 }: StopPanePollingOptions): Promise<void> {
-  const sessionId = getPanePollingSessionId(getWorkspace(), paneId);
-  updateWorkspace((current) => closePane(current, paneId));
-
-  if (!sessionId) {
-    return;
-  }
-
-  await stopConsumerBestEffort(stopConsumerSession, sessionId, onStopError);
+  await closeTabPollingSession({ tabId: paneId, ...options });
 }
 
-export function getPanePollingSessionId(
+export function getTabPollingSessionId(
   workspace: WorkspaceState,
-  paneId: number,
+  tabId: number,
 ): string | null {
-  const pane = workspace.panes.find((candidate) => candidate.id === paneId);
-  if (pane?.mode !== "poll") {
+  const tab = workspace.groups
+    .flatMap((group) => group.tabs)
+    .find((candidate) => candidate.id === tabId);
+  if (tab?.mode !== "poll") {
     return null;
   }
 
-  return pane.session?.sessionId ?? null;
+  return (
+    tab.session?.sessionId ??
+    (tab.status === "loading" ? tab.consumerGroup : null)
+  );
+}
+
+export const getPanePollingSessionId = getTabPollingSessionId;
+
+function getWorkspaceTab(workspace: WorkspaceState, tabId: number) {
+  return workspace.groups
+    .flatMap((group) => group.tabs)
+    .find((candidate) => candidate.id === tabId);
+}
+
+function eventBelongsToTabPollingRun(
+  workspace: WorkspaceState,
+  tabId: number,
+  event: MilenaBoundaryEvent,
+  expectedSessionId: string,
+): boolean {
+  const tab = getWorkspaceTab(workspace, tabId);
+  if (!tab || tab.mode !== "poll" || tab.status === "idle") {
+    return false;
+  }
+
+  const eventSessionId = eventPollingSessionId(event);
+  if (!eventSessionId) {
+    return true;
+  }
+
+  return (
+    (tab.session?.sessionId ?? tab.consumerGroup ?? expectedSessionId) ===
+    eventSessionId
+  );
+}
+
+function eventPollingSessionId(event: MilenaBoundaryEvent): string | null {
+  switch (event.event) {
+    case "boundaryOpened":
+    case "kafkaConsumerStarted":
+    case "kafkaConsumerError":
+    case "kafkaConsumerStopped":
+      return event.data.sessionId;
+    case "boundaryReady":
+      return event.data.sessionId;
+    case "kafkaRecord":
+      return event.data.record.sessionId;
+  }
 }
 
 async function stopConsumerBestEffort(

@@ -1,11 +1,24 @@
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type MouseEvent,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
+import {
+  DockviewReact,
+  type DockviewApi,
+  type DockviewReadyEvent,
+  type DockviewWillDropEvent,
+  type IDockviewHeaderActionsProps,
+  type IDockviewPanel,
+  type IDockviewPanelProps,
+} from "dockview-react";
+import "dockview-react/dist/styles/dockview.css";
 import {
   Edit3,
   Eye,
@@ -114,19 +127,35 @@ import {
   canStartPaneSession,
   clearPaneActivity,
   createInitialWorkspaceState,
+  expandGroup as expandWorkspaceGroupState,
   expandPane as expandWorkspacePaneState,
   getSelectedPane,
   isPaneEmpty,
+  moveTabToAdjacentGroup,
   openTopicInWorkspace,
+  restoreExpandedGroup,
   restoreExpandedPane,
   selectPane as selectWorkspacePane,
   selectTopicPreview,
   splitPane as splitWorkspacePane,
+  type TabMoveDirection,
   type SplitDirection,
   type TopicOpenPlacement,
   type WorkspacePane,
   type WorkspaceState,
 } from "./lib/workspace";
+import {
+  DOCKVIEW_TOPIC_PANEL_COMPONENT,
+  createDockviewWorkspaceOptions,
+  fromDockviewGroupId,
+  fromDockviewPanelId,
+  handleDockviewWillDrop,
+  mapWorkspaceToDockview,
+  reconcileDockviewSnapshot,
+  snapshotDockviewApi,
+  toDockviewPanelId,
+  type DockviewWorkspaceSnapshot,
+} from "./lib/dockviewWorkspace";
 import {
   cancelOnboardingForm,
   cancelDeleteEnvironment,
@@ -162,6 +191,31 @@ type TopicPreviewModel = {
 type VisibleColumns = {
   topics: boolean;
   inspector: boolean;
+};
+
+type DockviewPlacementHint = {
+  tabId: number;
+  direction: "right" | "below";
+} | null;
+
+type DockviewPanelParams = {
+  pane: WorkspacePane;
+  active: boolean;
+  environmentKey: string;
+  isExpanded: boolean;
+  publisher: PublisherPaneState;
+  renderPreferences: MessageRenderPreferences;
+  onActivate: () => void;
+  onPoll: () => void;
+  onPayloadChange: (payload: string) => void;
+  onKeyChange: (key: string) => void;
+  onFormatPayload: () => void;
+  onSend: () => void;
+  onRenderModeChange: (topic: string, mode: MessageRenderMode) => void;
+  onStop: () => void;
+  onClearMessages: () => void;
+  onClose: () => void;
+  showWorkspaceActions?: boolean;
 };
 
 const APPEARANCE_OPTIONS: {
@@ -1206,7 +1260,9 @@ export function WorkspaceShell({
   });
   const requestedTopicLoads = useRef(new Set<string>());
   const workspaceRef = useRef(workspace);
+  const workspaceGeneration = useRef(0);
   const pollingRuns = useRef(new Map<number, number>());
+  const dockviewPlacementHint = useRef<DockviewPlacementHint>(null);
   const currentAppearancePreference =
     appearancePreference ?? localAppearancePreference;
 
@@ -1253,17 +1309,6 @@ export function WorkspaceShell({
     () => getSelectedPane(workspace),
     [workspace],
   );
-  const expandedPane = useMemo(
-    () =>
-      workspace.expandedPaneId === null
-        ? null
-        : workspace.panes.find((pane) => pane.id === workspace.expandedPaneId) ??
-          null,
-    [workspace.expandedPaneId, workspace.panes],
-  );
-  const visiblePanes = expandedPane ? [expandedPane] : workspace.panes;
-  const visibleLayout = expandedPane ? "single" : workspace.layout;
-
   const activeTopic = activePane?.topic ?? null;
   const previewTopic = workspace.selectedTopic ?? activeTopic;
   const activeEnvironmentKey = environmentKey(activeRuntimeAuth);
@@ -1351,6 +1396,7 @@ export function WorkspaceShell({
   }
 
   function startPolling(paneId: number, topic: string) {
+    const generation = workspaceGeneration.current;
     const run = nextPollingRun(paneId);
     setTopicMenu(null);
     return startPanePollingSession({
@@ -1361,7 +1407,9 @@ export function WorkspaceShell({
       updateWorkspace,
       startConsumerSession: startKafkaConsumerSession,
       stopConsumerSession: stopKafkaConsumerSession,
-      isCurrent: () => pollingRuns.current.get(paneId) === run,
+      isCurrent: () =>
+        workspaceGeneration.current === generation &&
+        pollingRuns.current.get(paneId) === run,
       onEvent: (event) => {
         setActivity((current) =>
           appendBoundaryEventActivity(current, event, paneId),
@@ -1369,17 +1417,61 @@ export function WorkspaceShell({
       },
       onError: (message) =>
         recordGlobalError("consumer", "Consumer session failed", message, paneId),
-      onStopError: (message) =>
-        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
+      onStopError: (message) => {
+        if (workspaceGeneration.current === generation) {
+          recordGlobalError("consumer", "Consumer cleanup failed", message, paneId);
+        }
+      },
     });
   }
 
+  function moveTab(tabId: number, direction: TabMoveDirection) {
+    const current = workspaceRef.current;
+    const result = moveTabToAdjacentGroup(current, tabId, direction);
+    if (result.status === "moved") {
+      dockviewPlacementHint.current = {
+        tabId,
+        direction: direction === "bottom" ? "below" : "right",
+      };
+      workspaceRef.current = result.workspace;
+      setWorkspace(result.workspace);
+      return;
+    }
+
+    if (result.status === "tab-limit") {
+      recordGlobalError(
+        "topics",
+        "Max tabs opened in group",
+        "Max tabs opened in group",
+      );
+    } else if (result.status === "group-limit") {
+      recordGlobalError(
+        "topics",
+        "Group limit reached",
+        "Milena supports up to four open groups.",
+      );
+    }
+  }
+
   function splitPane(paneId: number, direction: SplitDirection) {
-    updateWorkspace((current) => splitWorkspacePane(current, paneId, direction));
+    if (direction === "top") {
+      updateWorkspace((current) => splitWorkspacePane(current, paneId, direction));
+      return;
+    }
+
+    moveTab(paneId, direction);
+  }
+
+  function expandGroup(groupId: number) {
+    updateWorkspace((current) => expandWorkspaceGroupState(current, groupId));
   }
 
   function expandPane(paneId: number) {
     updateWorkspace((current) => expandWorkspacePaneState(current, paneId));
+  }
+
+  function restoreGroup() {
+    updateWorkspace(restoreExpandedGroup);
   }
 
   function restorePane() {
@@ -1389,51 +1481,47 @@ export function WorkspaceShell({
   function openTopic(topic: string, placement: TopicOpenPlacement) {
     setTopicMenu(null);
     const current = workspaceRef.current;
-    const replacedPane = placement === "selected" ? getSelectedPane(current) : null;
-    const replacedSessionId = replacedPane
-      ? getPanePollingSessionId(current, replacedPane.id)
-      : null;
-
-    if (replacedPane) {
-      nextPollingRun(replacedPane.id);
-    }
-
     const result = openTopicInWorkspace(current, topic, placement);
+    if (
+      result.status === "opened" &&
+      (placement === "right" || placement === "bottom")
+    ) {
+      dockviewPlacementHint.current = {
+        tabId: result.workspace.selectedPaneId,
+        direction: placement === "bottom" ? "below" : "right",
+      };
+    }
     workspaceRef.current = result.workspace;
     setWorkspace(result.workspace);
 
-    if (result.status === "pane-limit") {
+    if (result.status === "tab-limit") {
       recordGlobalError(
         "topics",
-        "Pane limit reached",
-        "Milena supports up to four open panes.",
+        "Max tabs opened in group",
+        "Max tabs opened in group",
       );
-    }
-
-    if (replacedSessionId && replacedPane) {
-      void stopKafkaConsumerSession({ sessionId: replacedSessionId }).catch(
-        (cause: unknown) => {
-          const message = errorMessage(cause, "Kafka consumer cleanup failed");
-          recordGlobalError(
-            "consumer",
-            "Consumer cleanup failed",
-            message,
-            replacedPane.id,
-          );
-        },
+    } else if (result.status === "pane-limit" || result.status === "group-limit") {
+      recordGlobalError(
+        "topics",
+        "Group limit reached",
+        "Milena supports up to four open groups.",
       );
     }
   }
 
   function stopPane(paneId: number) {
+    const generation = workspaceGeneration.current;
     nextPollingRun(paneId);
     void stopPanePollingSession({
       paneId,
       getWorkspace: () => workspaceRef.current,
       updateWorkspace,
       stopConsumerSession: stopKafkaConsumerSession,
-      onStopError: (message) =>
-        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
+      onStopError: (message) => {
+        if (workspaceGeneration.current === generation) {
+          recordGlobalError("consumer", "Consumer cleanup failed", message, paneId);
+        }
+      },
     });
   }
 
@@ -1442,14 +1530,18 @@ export function WorkspaceShell({
   }
 
   function closeWorkspacePane(paneId: number) {
+    const generation = workspaceGeneration.current;
     nextPollingRun(paneId);
     void closePanePollingSession({
       paneId,
       getWorkspace: () => workspaceRef.current,
       updateWorkspace,
       stopConsumerSession: stopKafkaConsumerSession,
-      onStopError: (message) =>
-        recordGlobalError("consumer", "Consumer cleanup failed", message, paneId),
+      onStopError: (message) => {
+        if (workspaceGeneration.current === generation) {
+          recordGlobalError("consumer", "Consumer cleanup failed", message, paneId);
+        }
+      },
     });
   }
 
@@ -1492,15 +1584,23 @@ export function WorkspaceShell({
   }
 
   function sendPanePublisherRecord(paneId: number) {
+    const generation = workspaceGeneration.current;
     void sendPublisherRecord({
       paneId,
       auth: activeRuntimeAuth,
       getWorkspace: () => workspaceRef.current,
       getPublisherState: () => publisherState,
-      updatePublisherState,
+      updatePublisherState: (update) => {
+        if (workspaceGeneration.current === generation) {
+          updatePublisherState(update);
+        }
+      },
       publishRecord: publishKafkaRecord,
-      onError: (message) =>
-        recordGlobalError("producer", "Publish failed", message, paneId),
+      onError: (message) => {
+        if (workspaceGeneration.current === generation) {
+          recordGlobalError("producer", "Publish failed", message, paneId);
+        }
+      },
     });
   }
 
@@ -1548,15 +1648,19 @@ export function WorkspaceShell({
 
   function changeActiveEnvironment() {
     const currentWorkspace = workspaceRef.current;
+    const currentTabs = currentWorkspace.groups.flatMap((group) => group.tabs);
     const sessionIds = Array.from(
       new Set(
-        currentWorkspace.panes.flatMap((pane) => {
-          nextPollingRun(pane.id);
-          const sessionId = getPanePollingSessionId(currentWorkspace, pane.id);
+        currentTabs.flatMap((tab) => {
+          nextPollingRun(tab.id);
+          const sessionId = getPanePollingSessionId(currentWorkspace, tab.id);
           return sessionId ? [sessionId] : [];
         }),
       ),
     );
+    workspaceGeneration.current += 1;
+    pollingRuns.current.clear();
+    dockviewPlacementHint.current = null;
     const resetWorkspace = createInitialWorkspaceState();
     workspaceRef.current = resetWorkspace;
     setWorkspace(resetWorkspace);
@@ -1696,9 +1800,8 @@ export function WorkspaceShell({
                     <button
                       className="topic-open"
                       type="button"
-                      aria-haspopup="menu"
-                      aria-label={`Open actions for ${topic.name}`}
-                      onClick={(event) => openTopicMenu(event, topic.name)}
+                      aria-label={`Open ${topic.name}`}
+                      onClick={() => openTopic(topic.name, "selected")}
                     >
                       Open
                     </button>
@@ -1751,69 +1854,55 @@ export function WorkspaceShell({
             ) : null}
           </div>
         ) : null}
-        <section
-          className={[
-            "pane-grid",
-            visiblePanes.length === 0 ? "is-empty" : "",
-            expandedPane ? "is-expanded" : "",
-          ]
-            .filter(Boolean)
-            .join(" ")}
-          data-layout={visibleLayout}
-        >
-          {visiblePanes.length === 0 ? (
-            <p className="workspace-empty">
-              {previewTopic
-                ? "Topic selected for preview."
-                : "Select a topic to preview it."}
-            </p>
-          ) : visiblePanes.map((pane) => (
-            <Pane
-              key={pane.id}
-              pane={pane}
-              active={pane.id === workspace.selectedPaneId}
-              canSplit={!expandedPane && workspace.panes.length < 4}
-              isExpanded={pane.id === workspace.expandedPaneId}
-              onActivate={() => {
-                updateWorkspace((current) => ({
-                  ...selectWorkspacePane(current, pane.id),
-                  selectedTopic: pane.topic,
-                }));
-              }}
-              onPoll={() => pane.topic && startPolling(pane.id, pane.topic)}
-              publisher={getPublisherPaneState(
-                publisherState,
-                pane.id,
-                pane.topic,
-              )}
-              onPayloadChange={(payload) =>
-                changePublisherPayload(pane.id, pane.topic, payload)
-              }
-              onKeyChange={(key) => changePublisherKey(pane.id, pane.topic, key)}
-              onFormatPayload={() =>
-                formatPanePublisherPayload(pane.id, pane.topic)
-              }
-              onSend={() => sendPanePublisherRecord(pane.id)}
-              environmentKey={activeEnvironmentKey}
-              renderPreferences={messageRenderPreferences}
-              onRenderModeChange={setMessageRenderMode}
-              onSplit={(direction) => splitPane(pane.id, direction)}
-              onExpand={() => expandPane(pane.id)}
-              onRestore={restorePane}
-              onStop={() => stopPane(pane.id)}
-              onClearMessages={() => clearPaneMessages(pane.id)}
-              onClose={() => closeWorkspacePane(pane.id)}
-            />
-          ))}
-        </section>
+        <DockviewWorkspace
+          workspace={workspace}
+          placementHintRef={dockviewPlacementHint}
+          previewTopic={previewTopic}
+          publisherState={publisherState}
+          environmentKey={activeEnvironmentKey}
+          renderPreferences={messageRenderPreferences}
+          onActivateTab={(tab) => {
+            updateWorkspace((current) => ({
+              ...selectWorkspacePane(current, tab.id),
+              selectedTopic: tab.topic,
+            }));
+          }}
+          onDockviewSnapshot={(snapshot) => {
+            updateWorkspace((current) => {
+              const result = reconcileDockviewSnapshot(current, snapshot);
+              return result.status === "applied" ? result.workspace : current;
+            });
+          }}
+          onMoveTab={moveTab}
+          onExpandGroup={expandGroup}
+          onRestoreGroup={restoreGroup}
+          onPoll={(tab) => tab.topic && startPolling(tab.id, tab.topic)}
+          onPayloadChange={changePublisherPayload}
+          onKeyChange={changePublisherKey}
+          onFormatPayload={formatPanePublisherPayload}
+          onSend={sendPanePublisherRecord}
+          onRenderModeChange={setMessageRenderMode}
+          onStop={stopPane}
+          onClearMessages={clearPaneMessages}
+          onClose={closeWorkspacePane}
+        />
       </section>
 
       {visibleColumns.inspector ? (
         <RightRail
           activePane={activePane}
           activity={activity}
-          layout={workspace.layout}
           paneCount={workspace.panes.length}
+          workspaceContext={{
+            activeGroupId:
+              workspace.groups.find(
+                (group) => group.id === workspace.focusedGroupId,
+              )?.id ??
+              workspace.groups[0]?.id ??
+              null,
+            groupCount: workspace.groups.length,
+            tabCount: workspace.panes.length,
+          }}
           topicPreview={topicPreview}
           appearancePreference={currentAppearancePreference}
           onAppearancePreferenceChange={changeAppearancePreference}
@@ -1825,12 +1914,626 @@ export function WorkspaceShell({
         <TopicContextMenu
           menu={topicMenu}
           panes={workspace.panes}
-          selectedPaneId={workspace.selectedPaneId}
           onOpen={(placement) => openTopic(topicMenu.topic, placement)}
         />
       ) : null}
     </main>
   );
+}
+
+type DockviewWorkspaceProps = {
+  workspace: WorkspaceState;
+  placementHintRef: MutableRefObject<DockviewPlacementHint>;
+  previewTopic: string | null;
+  publisherState: PublisherState;
+  environmentKey: string;
+  renderPreferences: MessageRenderPreferences;
+  onActivateTab: (tab: WorkspacePane) => void;
+  onDockviewSnapshot: (snapshot: DockviewWorkspaceSnapshot) => void;
+  onMoveTab: (tabId: number, direction: TabMoveDirection) => void;
+  onExpandGroup: (groupId: number) => void;
+  onRestoreGroup: () => void;
+  onPoll: (tab: WorkspacePane) => void;
+  onPayloadChange: (paneId: number, topic: string | null, payload: string) => void;
+  onKeyChange: (paneId: number, topic: string | null, key: string) => void;
+  onFormatPayload: (paneId: number, topic: string | null) => void;
+  onSend: (paneId: number) => void;
+  onRenderModeChange: (topic: string, mode: MessageRenderMode) => void;
+  onStop: (paneId: number) => void;
+  onClearMessages: (paneId: number) => void;
+  onClose: (paneId: number) => void;
+};
+
+const DOCKVIEW_COMPONENTS = {
+  [DOCKVIEW_TOPIC_PANEL_COMPONENT]: DockviewTopicPanel,
+};
+
+function DockviewWorkspace({
+  workspace,
+  placementHintRef,
+  previewTopic,
+  publisherState,
+  environmentKey,
+  renderPreferences,
+  onActivateTab,
+  onDockviewSnapshot,
+  onMoveTab,
+  onExpandGroup,
+  onRestoreGroup,
+  onPoll,
+  onPayloadChange,
+  onKeyChange,
+  onFormatPayload,
+  onSend,
+  onRenderModeChange,
+  onStop,
+  onClearMessages,
+  onClose,
+}: DockviewWorkspaceProps) {
+  const dockviewApi = useRef<DockviewApi | null>(null);
+  const dockviewSubscriptions = useRef<{ dispose: () => void }[]>([]);
+  const syncingDockview = useRef(false);
+  const [dockviewReadyTick, setDockviewReadyTick] = useState(0);
+  const dockviewCallbacks = useRef({ onClose, onDockviewSnapshot });
+  useEffect(() => {
+    dockviewCallbacks.current = { onClose, onDockviewSnapshot };
+  }, [onClose, onDockviewSnapshot]);
+  const options = useMemo(createDockviewWorkspaceOptions, []);
+  const panelParams = useCallback(
+    (pane: WorkspacePane): DockviewPanelParams => ({
+      pane,
+      active: pane.id === workspace.selectedPaneId,
+      environmentKey,
+      isExpanded: pane.id === workspace.expandedPaneId,
+      publisher: getPublisherPaneState(publisherState, pane.id, pane.topic),
+      renderPreferences,
+      onActivate: () => onActivateTab(pane),
+      onPoll: () => onPoll(pane),
+      onPayloadChange: (payload) => onPayloadChange(pane.id, pane.topic, payload),
+      onKeyChange: (key) => onKeyChange(pane.id, pane.topic, key),
+      onFormatPayload: () => onFormatPayload(pane.id, pane.topic),
+      onSend: () => onSend(pane.id),
+      onRenderModeChange,
+      onStop: () => onStop(pane.id),
+      onClearMessages: () => onClearMessages(pane.id),
+      onClose: () => onClose(pane.id),
+    }),
+    [
+      environmentKey,
+      onActivateTab,
+      onClearMessages,
+      onClose,
+      onFormatPayload,
+      onKeyChange,
+      onPayloadChange,
+      onPoll,
+      onRenderModeChange,
+      onSend,
+      onStop,
+      publisherState,
+      renderPreferences,
+      workspace.expandedPaneId,
+      workspace.selectedPaneId,
+    ],
+  );
+
+  const rightHeaderActionsComponent = useMemo(
+    () =>
+      function DockviewHeaderActions(props: IDockviewHeaderActionsProps) {
+        return (
+          <DockviewWorkspaceHeaderActions
+            {...props}
+            workspace={workspace}
+            onMoveTab={onMoveTab}
+            onExpandGroup={onExpandGroup}
+            onRestoreGroup={onRestoreGroup}
+            onClose={onClose}
+          />
+        );
+      },
+    [onClose, onExpandGroup, onMoveTab, onRestoreGroup, workspace],
+  );
+
+  const onReady = useCallback((event: DockviewReadyEvent) => {
+    dockviewSubscriptions.current.forEach((disposable) => disposable.dispose());
+    dockviewApi.current = event.api;
+    const syncFromDockview = () => {
+      if (syncingDockview.current) {
+        return;
+      }
+
+      dockviewCallbacks.current.onDockviewSnapshot(snapshotDockviewApi(event.api));
+    };
+    dockviewSubscriptions.current = [
+      event.api.onDidRemovePanel((panel) => {
+        if (syncingDockview.current) {
+          return;
+        }
+
+        const tabId = fromDockviewPanelId(panel.id);
+        if (tabId !== null) {
+          dockviewCallbacks.current.onClose(tabId);
+        }
+      }),
+      event.api.onDidMovePanel(syncFromDockview),
+      event.api.onDidDrop(syncFromDockview),
+    ];
+    setDockviewReadyTick((tick) => tick + 1);
+  }, []);
+
+  useEffect(
+    () => () => {
+      dockviewSubscriptions.current.forEach((disposable) => disposable.dispose());
+      dockviewSubscriptions.current = [];
+    },
+    [],
+  );
+
+  useLayoutEffect(() => {
+    const api = dockviewApi.current;
+    if (!api) {
+      return;
+    }
+
+    syncingDockview.current = true;
+    try {
+      syncDockviewWorkspace({
+        api,
+        workspace,
+        panelParams,
+        placementHint: placementHintRef.current,
+      });
+      placementHintRef.current = null;
+    } finally {
+      syncingDockview.current = false;
+    }
+  }, [dockviewReadyTick, panelParams, placementHintRef, workspace]);
+
+  if (workspace.groups.length === 0) {
+    return (
+      <section className="dockview-workspace is-empty">
+        <p className="workspace-empty">
+          {previewTopic
+            ? "Topic selected for preview."
+            : "Select a topic to preview it."}
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="dockview-workspace" aria-label="Tabbed workspace">
+      <DockviewReact
+        className="dockview-theme-milena"
+        components={DOCKVIEW_COMPONENTS}
+        disableFloatingGroups={options.disableFloatingGroups}
+        getTabContextMenuItems={options.getTabContextMenuItems}
+        getTabGroupChipContextMenuItems={options.getTabGroupChipContextMenuItems}
+        onReady={onReady}
+        onWillDrop={(event: DockviewWillDropEvent) =>
+          handleDockviewWillDrop(workspace, event)
+        }
+        rightHeaderActionsComponent={rightHeaderActionsComponent}
+        singleTabMode="fullwidth"
+      />
+    </section>
+  );
+}
+
+function DockviewTopicPanel({ params }: IDockviewPanelProps<DockviewPanelParams>) {
+  return (
+    <Pane
+      pane={params.pane}
+      active={params.active}
+      canSplit={false}
+      isExpanded={params.isExpanded}
+      onActivate={params.onActivate}
+      onPoll={params.onPoll}
+      publisher={params.publisher}
+      onPayloadChange={params.onPayloadChange}
+      onKeyChange={params.onKeyChange}
+      onFormatPayload={params.onFormatPayload}
+      onSend={params.onSend}
+      environmentKey={params.environmentKey}
+      renderPreferences={params.renderPreferences}
+      onRenderModeChange={params.onRenderModeChange}
+      onSplit={() => undefined}
+      onExpand={() => undefined}
+      onRestore={() => undefined}
+      onStop={params.onStop}
+      onClearMessages={params.onClearMessages}
+      onClose={params.onClose}
+      showWorkspaceActions={false}
+    />
+  );
+}
+
+function DockviewWorkspaceHeaderActions({
+  activePanel,
+  api,
+  group,
+  workspace,
+  onMoveTab,
+  onExpandGroup,
+  onRestoreGroup,
+  onClose,
+}: IDockviewHeaderActionsProps & {
+  workspace: WorkspaceState;
+  onMoveTab: (tabId: number, direction: TabMoveDirection) => void;
+  onExpandGroup: (groupId: number) => void;
+  onRestoreGroup: () => void;
+  onClose: (paneId: number) => void;
+}) {
+  const activeTabId = activePanel ? fromDockviewPanelId(activePanel.id) : null;
+  const groupId =
+    fromDockviewGroupId(group.id) ??
+    workspace.groups.find((candidate) =>
+      candidate.tabs.some((tab) => tab.id === activeTabId),
+    )?.id ??
+    null;
+  const moveDisabled =
+    activeTabId === null ||
+    (workspace.groups.length === 1 && workspace.groups[0]?.tabs.length === 1);
+  const maximized = api.isMaximized();
+
+  return (
+    <div className="dockview-group-actions">
+      <button
+        className="pane-icon-button"
+        type="button"
+        aria-label={
+          activeTabId === null
+            ? "Move active tab right"
+            : `Move tab ${activeTabId} right`
+        }
+        title="Move active tab right"
+        disabled={moveDisabled}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (activeTabId !== null) {
+            onMoveTab(activeTabId, "right");
+          }
+        }}
+      >
+        <SplitSquareHorizontal aria-hidden="true" size={14} strokeWidth={1.9} />
+      </button>
+      <button
+        className="pane-icon-button"
+        type="button"
+        aria-label={
+          activeTabId === null
+            ? "Move active tab bottom"
+            : `Move tab ${activeTabId} bottom`
+        }
+        title="Move active tab bottom"
+        disabled={moveDisabled}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (activeTabId !== null) {
+            onMoveTab(activeTabId, "bottom");
+          }
+        }}
+      >
+        <SplitSquareVertical aria-hidden="true" size={14} strokeWidth={1.9} />
+      </button>
+      <button
+        className="pane-icon-button"
+        type="button"
+        aria-label={
+          maximized
+            ? `Restore group ${groupId ?? ""}`.trim()
+            : `Maximize group ${groupId ?? ""}`.trim()
+        }
+        title={maximized ? "Restore group" : "Maximize group"}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (maximized) {
+            api.exitMaximized();
+            onRestoreGroup();
+          } else {
+            api.maximize();
+            if (groupId !== null) {
+              onExpandGroup(groupId);
+            }
+          }
+        }}
+      >
+        {maximized ? (
+          <Minimize2 aria-hidden="true" size={14} strokeWidth={1.9} />
+        ) : (
+          <Maximize2 aria-hidden="true" size={14} strokeWidth={1.9} />
+        )}
+      </button>
+      <button
+        className="pane-icon-button pane-close-button"
+        type="button"
+        aria-label={
+          activeTabId === null ? "Close active tab" : `Close tab ${activeTabId}`
+        }
+        title="Close active tab"
+        disabled={activeTabId === null}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (activeTabId !== null) {
+            onClose(activeTabId);
+          }
+        }}
+      >
+        <X aria-hidden="true" size={14} strokeWidth={2.1} />
+      </button>
+    </div>
+  );
+}
+
+export function syncDockviewWorkspace({
+  api,
+  workspace,
+  panelParams,
+  placementHint,
+}: {
+  api: DockviewApi;
+  workspace: WorkspaceState;
+  panelParams: (pane: WorkspacePane) => DockviewPanelParams;
+  placementHint: DockviewPlacementHint;
+}) {
+  const mapping = mapWorkspaceToDockview(workspace);
+
+  const canonicalPanelIds = new Set(mapping.panels.map((panel) => panel.id));
+  for (const panel of [...api.panels]) {
+    if (!canonicalPanelIds.has(panel.id)) {
+      api.removePanel(panel);
+    }
+  }
+
+  for (const group of workspace.groups) {
+    const groupIndex = workspace.groups.findIndex(
+      (candidate) => candidate.id === group.id,
+    );
+
+    for (const [tabIndex, tab] of group.tabs.entries()) {
+      const panelId = toDockviewPanelId(tab.id);
+      const existing = api.getPanel(panelId);
+      const params = panelParams(tab);
+
+      if (existing) {
+        updateDockviewPanel(existing, tab, params);
+        moveDockviewPanelIfNeeded({
+          api,
+          workspace,
+          groupIndex,
+          tabIndex,
+          panel: existing,
+          placementHint,
+        });
+        continue;
+      }
+
+      api.addPanel({
+        id: panelId,
+        title: tab.title,
+        component: DOCKVIEW_TOPIC_PANEL_COMPONENT,
+        params,
+        position: dockviewPanelPosition({
+          api,
+          workspace,
+          groupIndex,
+          tabIndex,
+          tabId: tab.id,
+          placementHint,
+        }),
+      });
+    }
+  }
+
+  if (api.width === 0 && api.height === 0) {
+    api.layout(1_000, 700, true);
+  }
+
+  const activePanelId = toDockviewPanelId(workspace.selectedPaneId);
+  api.getPanel(activePanelId)?.api.setActive();
+  if (workspace.expandedGroupId === null && api.hasMaximizedGroup()) {
+    api.exitMaximizedGroup();
+  }
+}
+
+function moveDockviewPanelIfNeeded({
+  api,
+  workspace,
+  groupIndex,
+  tabIndex,
+  panel,
+  placementHint,
+}: {
+  api: DockviewApi;
+  workspace: WorkspaceState;
+  groupIndex: number;
+  tabIndex: number;
+  panel: IDockviewPanel;
+  placementHint: DockviewPlacementHint;
+}) {
+  const group = workspace.groups[groupIndex];
+  if (!group) {
+    return;
+  }
+
+  const currentIndex = panel.group.panels.findIndex(
+    (candidate) => candidate.id === panel.id,
+  );
+  const targetGroup = dockviewGroupForWorkspaceGroup(api, group, panel.id);
+  if (targetGroup) {
+    if (panel.group !== targetGroup || currentIndex !== tabIndex) {
+      panel.api.moveTo({
+        group: targetGroup,
+        position: "center",
+        index: tabIndex,
+      });
+    }
+    return;
+  }
+
+  if (dockviewGroupMatchesWorkspaceGroup(panel.group, group)) {
+    return;
+  }
+
+  const tabId = fromDockviewPanelId(panel.id);
+  if (tabId === null || placementHint?.tabId !== tabId) {
+    return;
+  }
+
+  const referenceGroup = dockviewReferenceGroup(api, workspace, groupIndex);
+  if (!referenceGroup) {
+    return;
+  }
+
+  panel.api.moveTo({
+    group: referenceGroup,
+    position: dockviewMovePosition(placementHint, panel.id),
+    index: tabIndex,
+  });
+}
+
+function updateDockviewPanel(
+  panel: IDockviewPanel,
+  tab: WorkspacePane,
+  params: DockviewPanelParams,
+) {
+  if (panel.title !== tab.title) {
+    panel.setTitle(tab.title ?? "");
+  }
+  panel.api.updateParameters(params);
+}
+
+function dockviewPanelPosition({
+  api,
+  workspace,
+  groupIndex,
+  tabIndex,
+  tabId,
+  placementHint,
+}: {
+  api: DockviewApi;
+  workspace: WorkspaceState;
+  groupIndex: number;
+  tabIndex: number;
+  tabId: number;
+  placementHint: DockviewPlacementHint;
+}): Parameters<DockviewApi["addPanel"]>[0]["position"] {
+  const group = workspace.groups[groupIndex];
+  const previousTab = group?.tabs[tabIndex - 1];
+  if (previousTab) {
+    return {
+      referencePanel: toDockviewPanelId(previousTab.id),
+      direction: "within",
+      index: tabIndex,
+    };
+  }
+
+  const targetGroup = group
+    ? dockviewGroupForWorkspaceGroup(api, group, toDockviewPanelId(tabId))
+    : undefined;
+  if (targetGroup) {
+    return {
+      referenceGroup: targetGroup,
+      direction: "within",
+      index: tabIndex,
+    };
+  }
+
+  const referenceGroup = dockviewReferenceGroup(api, workspace, groupIndex);
+
+  if (referenceGroup) {
+    return {
+      referenceGroup,
+      direction: dockviewAddPanelDirection(placementHint, tabId),
+    };
+  }
+
+  return undefined;
+}
+
+function dockviewGroupForWorkspaceGroup(
+  api: DockviewApi,
+  group: WorkspaceState["groups"][number],
+  movingPanelId: string,
+): IDockviewPanel["group"] | undefined {
+  const desiredPanelIds = new Set(
+    group.tabs.map((tab) => toDockviewPanelId(tab.id)),
+  );
+
+  for (const tab of group.tabs) {
+    const panelId = toDockviewPanelId(tab.id);
+    if (panelId === movingPanelId) {
+      continue;
+    }
+
+    const panel = api.getPanel(panelId);
+    if (
+      panel &&
+      panel.group.panels.every((candidate) => desiredPanelIds.has(candidate.id))
+    ) {
+      return panel.group;
+    }
+  }
+
+  return undefined;
+}
+
+function dockviewReferenceGroup(
+  api: DockviewApi,
+  workspace: WorkspaceState,
+  groupIndex: number,
+): IDockviewPanel["group"] | undefined {
+  for (let index = groupIndex - 1; index >= 0; index -= 1) {
+    const group = workspace.groups[index];
+    const panel = group ? api.getPanel(toDockviewPanelId(group.activeTabId)) : null;
+    if (panel) {
+      return panel.group;
+    }
+  }
+
+  for (let index = groupIndex + 1; index < workspace.groups.length; index += 1) {
+    const group = workspace.groups[index];
+    const panel = group ? api.getPanel(toDockviewPanelId(group.activeTabId)) : null;
+    if (panel) {
+      return panel.group;
+    }
+  }
+
+  return undefined;
+}
+
+function dockviewGroupMatchesWorkspaceGroup(
+  group: IDockviewPanel["group"],
+  workspaceGroup: WorkspaceState["groups"][number],
+): boolean {
+  const actualPanelIds = group.panels.map((panel) => panel.id);
+  const expectedPanelIds = workspaceGroup.tabs.map((tab) =>
+    toDockviewPanelId(tab.id),
+  );
+
+  return (
+    actualPanelIds.length === expectedPanelIds.length &&
+    expectedPanelIds.every((panelId) => actualPanelIds.includes(panelId))
+  );
+}
+
+function dockviewAddPanelDirection(
+  placementHint: DockviewPlacementHint,
+  tabId: number,
+) {
+  return placementHint?.tabId === tabId ? placementHint.direction : "right";
+}
+
+function dockviewMovePosition(
+  placementHint: DockviewPlacementHint,
+  panelId: string,
+) {
+  const tabId = fromDockviewPanelId(panelId);
+  return tabId !== null && placementHint?.tabId === tabId
+    ? placementHint.direction === "below"
+      ? "bottom"
+      : "right"
+    : "right";
 }
 
 function AppearanceControl({
@@ -1868,8 +2571,8 @@ export function RightRail({
   activePane,
   activity,
   appearancePreference = "system",
-  layout,
   paneCount,
+  workspaceContext,
   topicPreview,
   onAppearancePreferenceChange = () => undefined,
   onClearActivity,
@@ -1878,25 +2581,29 @@ export function RightRail({
   activePane: WorkspacePane | undefined;
   activity: GlobalActivityEntry[];
   appearancePreference?: AppearancePreference;
-  layout: WorkspaceState["layout"];
   paneCount: number;
+  workspaceContext?: WorkspaceContext;
   topicPreview: TopicPreviewModel | null;
   onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
   onClearActivity: () => void;
   onHideInspector?: () => void;
 }) {
+  const tabSummary = formatGroupSummary(paneCount);
+  const groupSummary = workspaceContext
+    ? formatWorkspaceContext(workspaceContext)
+    : tabSummary;
   const statusClass = topicPreview ? "preview" : activePane?.status ?? "idle";
   const contextPill = topicPreview ? "preview" : activePane ? "selected" : "idle";
   const inspectorTitle = topicPreview
     ? "Topic preview"
     : activePane
-      ? "Selected pane"
+      ? "Selected tab"
       : "No selection";
   const inspectorContext = topicPreview
     ? topicPreview.name
     : activePane
-      ? `Pane ${activePane.id}`
-      : formatLayout(layout, paneCount);
+      ? `Tab ${activePane.id}`
+      : groupSummary;
 
   return (
     <aside className="rail rail-right" aria-label="Activity log">
@@ -1954,8 +2661,8 @@ export function RightRail({
           {activePane ? (
             <>
               <div>
-                <span>Pane</span>
-                <strong>Pane {activePane.id}</strong>
+                <span>Tab</span>
+                <strong>Tab {activePane.id}</strong>
               </div>
               <div>
                 <span>Status</span>
@@ -1972,8 +2679,12 @@ export function RightRail({
             <strong>{activePane?.consumerGroup ?? "none"}</strong>
           </div>
           <div>
-            <span>Layout</span>
-            <strong>{formatLayout(layout, paneCount)}</strong>
+            <span>Workspace</span>
+            <strong>{tabSummary}</strong>
+          </div>
+          <div>
+            <span>Active group</span>
+            <strong>{groupSummary}</strong>
           </div>
         </section>
       )}
@@ -1993,7 +2704,7 @@ export function RightRail({
               key={event.id}
             >
               <span>{event.time}</span>
-              <strong>{event.paneId ? `P${event.paneId}` : event.source}</strong>
+              <strong>{formatActivityScope(event)}</strong>
               <span>
                 {event.message}
                 {event.detail ? <small>{event.detail}</small> : null}
@@ -2005,6 +2716,12 @@ export function RightRail({
     </aside>
   );
 }
+
+type WorkspaceContext = {
+  activeGroupId: number | null;
+  groupCount: number;
+  tabCount: number;
+};
 
 type PaneProps = {
   pane: WorkspacePane;
@@ -2027,6 +2744,7 @@ type PaneProps = {
   onStop: () => void;
   onClearMessages: () => void;
   onClose: () => void;
+  showWorkspaceActions?: boolean;
 };
 
 export function Pane({
@@ -2050,6 +2768,7 @@ export function Pane({
   onStop,
   onClearMessages,
   onClose,
+  showWorkspaceActions = true,
 }: PaneProps) {
   const empty = isPaneEmpty(pane);
   const canStart = canStartPaneSession(pane);
@@ -2108,15 +2827,15 @@ export function Pane({
       ]
         .filter(Boolean)
         .join(" ")}
-      aria-label={`Pane ${pane.id}`}
+      aria-label={`Tab ${pane.id}`}
       aria-current={active ? "true" : undefined}
       onClick={onActivate}
     >
       <header className="pane-header">
         <div className="pane-identity">
-          <span className="eyebrow">Pane {pane.id} / {pane.mode}</span>
+          <span className="eyebrow">Tab {pane.id} / {pane.mode}</span>
           <div className="pane-topic-row">
-            <h2>{pane.topic ?? "Empty pane"}</h2>
+            <h2>{pane.topic ?? "Empty tab"}</h2>
             <div className="pane-session-actions">
               <button
                 className="pane-session-button"
@@ -2138,15 +2857,16 @@ export function Pane({
           </div>
           <small>{pane.consumerGroup ?? "No consumer group"}</small>
         </div>
+        {showWorkspaceActions ? (
         <div className="pane-actions">
           <button
             className="pane-icon-button pane-expand-button"
             type="button"
             title={
-              isExpanded ? `Restore pane ${pane.id}` : `Maximize pane ${pane.id}`
+                isExpanded ? `Restore tab ${pane.id}` : `Maximize tab ${pane.id}`
             }
             aria-label={
-              isExpanded ? `Restore pane ${pane.id}` : `Maximize pane ${pane.id}`
+                isExpanded ? `Restore tab ${pane.id}` : `Maximize tab ${pane.id}`
             }
             onClick={stopEvent(isExpanded ? onRestore : onExpand)}
           >
@@ -2159,8 +2879,8 @@ export function Pane({
           <button
             className="pane-icon-button pane-close-button"
             type="button"
-            title={`Close pane ${pane.id}`}
-            aria-label={`Close pane ${pane.id}`}
+            title={`Close tab ${pane.id}`}
+            aria-label={`Close tab ${pane.id}`}
             onClick={stopEvent(onClose)}
           >
             <X aria-hidden="true" size={15} strokeWidth={2.1} />
@@ -2168,24 +2888,25 @@ export function Pane({
           <button
             className="pane-icon-button pane-split-button"
             type="button"
-            aria-label={`Split pane ${pane.id} right`}
-            title={`Split pane ${pane.id} right`}
+            aria-label={`Move tab ${pane.id} right`}
+            title={`Move tab ${pane.id} right`}
             onClick={stopEvent(() => onSplit("right"))}
-            disabled={!canSplit}
-          >
-            <SplitSquareVertical aria-hidden="true" size={15} strokeWidth={1.9} />
-          </button>
-          <button
-            className="pane-icon-button pane-split-button"
-            type="button"
-            aria-label={`Split pane ${pane.id} top`}
-            title={`Split pane ${pane.id} top`}
-            onClick={stopEvent(() => onSplit("top"))}
             disabled={!canSplit}
           >
             <SplitSquareHorizontal aria-hidden="true" size={15} strokeWidth={1.9} />
           </button>
+          <button
+            className="pane-icon-button pane-split-button"
+            type="button"
+            aria-label={`Move tab ${pane.id} bottom`}
+            title={`Move tab ${pane.id} bottom`}
+            onClick={stopEvent(() => onSplit("bottom"))}
+            disabled={!canSplit}
+          >
+            <SplitSquareVertical aria-hidden="true" size={15} strokeWidth={1.9} />
+          </button>
         </div>
+        ) : null}
       </header>
 
       {pane.error ? (
@@ -2212,7 +2933,7 @@ export function Pane({
           publisherExpanded ? "has-expanded-publisher" : "has-collapsed-publisher"
         }`}
       >
-        <section className="consumer" aria-label={`Consumer for pane ${pane.id}`}>
+        <section className="consumer" aria-label={`Consumer for tab ${pane.id}`}>
           <header>
             <span className="eyebrow">Consumer</span>
             <div className="consumer-controls">
@@ -2225,7 +2946,7 @@ export function Pane({
                     <Search aria-hidden="true" size={12} strokeWidth={2} />
                     <span>Filter</span>
                     <input
-                      aria-label={`Filter records for pane ${pane.id}`}
+                      aria-label={`Filter records for tab ${pane.id}`}
                       type="search"
                       placeholder="Key or payload"
                       value={consumerFilter}
@@ -2258,8 +2979,8 @@ export function Pane({
               <button
                 className="secondary compact consumer-clear-button"
                 type="button"
-                aria-label={`Clear messages for pane ${pane.id}`}
-                title={`Clear messages for pane ${pane.id}`}
+                aria-label={`Clear messages for tab ${pane.id}`}
+                title={`Clear messages for tab ${pane.id}`}
                 onClick={stopEvent(clearMessages)}
                 disabled={recordEvents.length === 0}
               >
@@ -2299,7 +3020,7 @@ export function Pane({
 
         <section
           className={`publisher ${publisherExpanded ? "expanded" : "collapsed"}`}
-          aria-label={`Publisher for pane ${pane.id}`}
+          aria-label={`Publisher for tab ${pane.id}`}
           onClick={(event) => event.stopPropagation()}
         >
           <header>
@@ -2314,7 +3035,7 @@ export function Pane({
               type="button"
               aria-controls={`publisher-panel-${pane.id}`}
               aria-expanded={publisherExpanded}
-              aria-label={`${publisherExpanded ? "Collapse" : "Expand"} publisher for pane ${pane.id}`}
+              aria-label={`${publisherExpanded ? "Collapse" : "Expand"} publisher for tab ${pane.id}`}
               onClick={stopEvent(() =>
                 setPublisherExpanded((expanded) => !expanded),
               )}
@@ -2342,7 +3063,7 @@ export function Pane({
                 <label>
                   <span>Key</span>
                   <input
-                    aria-label={`Kafka key for pane ${pane.id}`}
+                    aria-label={`Kafka key for tab ${pane.id}`}
                     placeholder="Optional key"
                     type="text"
                     value={publisher.key}
@@ -2352,7 +3073,7 @@ export function Pane({
                 <label>
                   <span>Payload</span>
                   <textarea
-                    aria-label={`JSON payload for pane ${pane.id}`}
+                    aria-label={`JSON payload for tab ${pane.id}`}
                     spellCheck={false}
                     value={publisher.payload}
                     onChange={(event) => onPayloadChange(event.currentTarget.value)}
@@ -2497,16 +3218,12 @@ function renderHighlightedText(text: string, filter: string): ReactNode {
 function TopicContextMenu({
   menu,
   panes,
-  selectedPaneId,
   onOpen,
 }: {
   menu: NonNullable<TopicMenuState>;
   panes: WorkspacePane[];
-  selectedPaneId: number;
   onOpen: (placement: TopicOpenPlacement) => void;
 }) {
-  const selectedPane = panes.find((pane) => pane.id === selectedPaneId);
-
   return (
     <div
       className="topic-menu"
@@ -2520,7 +3237,7 @@ function TopicContextMenu({
       </header>
       {panes.length === 0 ? (
         <div className="topic-menu-row" role="none">
-          <span>First pane</span>
+          <span>First tab</span>
           <button type="button" role="menuitem" onClick={() => onOpen("selected")}>
             Open
           </button>
@@ -2528,40 +3245,31 @@ function TopicContextMenu({
       ) : (
         <>
           <div className="topic-menu-row" role="none">
-            <span>
-              {selectedPane ? `Pane ${selectedPane.id}` : "Selected pane"}
-            </span>
+            <span>Focused group</span>
             <button
               type="button"
               role="menuitem"
               onClick={() => onOpen("selected")}
             >
-              Open selected
+              Open in focused group
             </button>
           </div>
           <div className="topic-menu-row" role="none">
-            <span>Split</span>
+            <span>New group</span>
             <div className="topic-menu-actions">
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => onOpen("right")}
               >
-                Split right
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => onOpen("top")}
-              >
-                Split top
+                New group right
               </button>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => onOpen("bottom")}
               >
-                Split bottom
+                New group bottom
               </button>
             </div>
           </div>
@@ -2571,24 +3279,29 @@ function TopicContextMenu({
   );
 }
 
-function formatLayout(layout: string, paneCount: number) {
-  if (paneCount === 0) {
-    return "no panes";
+function formatGroupSummary(tabCount: number) {
+  if (tabCount === 0) {
+    return "no tabs";
   }
 
-  if (layout === "quad") {
-    return "2 x 2";
-  }
+  return tabCount === 1 ? "1 tab" : `${tabCount} tabs`;
+}
 
-  if (layout === "two-top") {
-    return "2 panes / top";
-  }
+function formatWorkspaceContext(context: WorkspaceContext) {
+  const groupIdentity =
+    context.activeGroupId === null ? "No group" : `Group ${context.activeGroupId}`;
+  const groupCount =
+    context.groupCount === 0
+      ? "no groups"
+      : context.groupCount === 1
+        ? "1 group"
+        : `${context.groupCount} groups`;
 
-  if (layout === "two-right") {
-    return "2 panes / right";
-  }
+  return `${groupIdentity} / ${groupCount} / ${formatGroupSummary(context.tabCount)}`;
+}
 
-  return "1 pane";
+function formatActivityScope(event: GlobalActivityEntry) {
+  return event.paneId ? `Tab ${event.paneId}` : event.source;
 }
 
 function topicRailStatus(status: string, topicCount: number) {

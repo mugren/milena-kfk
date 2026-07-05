@@ -114,6 +114,7 @@ export function resetRendererHarness() {
   emittedEvents = {};
   nextSession = 0;
   installLocalStorage();
+  installResizeObserver();
   vi.resetAllMocks();
 
   tauri.loadAppState.mockResolvedValue(appState);
@@ -237,7 +238,12 @@ export async function openTopic(
   topic: string,
   action = "Open",
 ) {
-  await user.click(topicOpenActions(topic));
+  if (action === "Open") {
+    await user.click(topicOpenActions(topic));
+    return;
+  }
+
+  fireEvent.contextMenu(topicRow(topic));
   await user.click(
     within(await screen.findByRole("menu")).getByRole("menuitem", {
       name: action,
@@ -246,11 +252,11 @@ export async function openTopic(
 }
 
 export function topicOpenActions(topic: string): HTMLElement {
-  return screen.getByRole("button", { name: `Open actions for ${topic}` });
+  return screen.getByRole("button", { name: `Open ${topic}` });
 }
 
 export function pane(id: string): HTMLElement {
-  return screen.getByLabelText(`Pane ${id}`);
+  return screen.getByLabelText(`Tab ${id}`);
 }
 
 export function messageRowButton(topic: string): HTMLElement {
@@ -372,5 +378,30 @@ function installLocalStorage() {
   Object.defineProperty(window, "localStorage", {
     configurable: true,
     value: storage,
+  });
+}
+
+function installResizeObserver() {
+  class TestResizeObserver implements ResizeObserver {
+    observe() {
+      return undefined;
+    }
+
+    unobserve() {
+      return undefined;
+    }
+
+    disconnect() {
+      return undefined;
+    }
+  }
+
+  Object.defineProperty(window, "ResizeObserver", {
+    configurable: true,
+    value: TestResizeObserver,
+  });
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: TestResizeObserver,
   });
 }

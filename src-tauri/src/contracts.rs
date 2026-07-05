@@ -141,6 +141,8 @@ pub struct StartKafkaConsumerSessionRequest {
     pub auth: RuntimeAuthConfig,
     pub topics: Vec<String>,
     #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
     pub from_beginning: bool,
 }
 

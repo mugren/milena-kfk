@@ -30,8 +30,17 @@ import {
   topics,
   topicSelect,
 } from "./App.renderer.test-utils";
+import { syncDockviewWorkspace } from "./App";
 import type { KafkaConsumerSession } from "./lib/tauri";
-import type { WorkspacePane } from "./lib/workspace";
+import {
+  createInitialWorkspaceState,
+  moveTabToAdjacentGroup,
+  openTopicInFocusedGroup,
+  openTopicInWorkspace,
+  selectTab,
+  type WorkspacePane,
+  type WorkspaceTab,
+} from "./lib/workspace";
 
 beforeEach(resetRendererHarness);
 afterEach(() => {
@@ -54,8 +63,8 @@ describe("App renderer flow harness", () => {
     expect(within(topicsRail).getByText("local-dev")).toBeVisible();
     expect(within(topicsRail).queryByText("local")).not.toBeInTheDocument();
     expect(within(topicsRail).queryByText("macos-dev")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Activity log")).toHaveTextContent("no panes");
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("no tabs");
     expect(screen.getByLabelText("Activity log")).toHaveTextContent("Inactive");
     expect(screen.getByText("No topics")).toBeVisible();
     expect(screen.getByText("localhost:19092")).toBeVisible();
@@ -88,6 +97,161 @@ describe("App renderer flow harness", () => {
     await user.click(screen.getByRole("button", { name: "Change environment" }));
 
     expect(onChangeEnvironment).toHaveBeenCalledWith("local-dev");
+  });
+
+  it("resets the tabbed workspace immediately and stops active tab sessions when changing environment", async () => {
+    const user = userEvent.setup();
+    const onChangeEnvironment = vi.fn();
+    render(<WorkspaceShell onChangeEnvironment={onChangeEnvironment} />);
+    await loadedTopics();
+
+    await openTopic(user, "orders.created");
+    await openTopic(user, "payments.authorized", "New group right");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-1");
+    await user.click(within(pane("2")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-2");
+    emit("session-1", kafkaRecord("session-1", {
+      offset: 42,
+      payload: "{\"old\":1}",
+    }));
+    emit("session-2", kafkaRecord("session-2", {
+      topic: "payments.authorized",
+      offset: 7,
+      payload: "{\"old\":2}",
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Change environment" }));
+
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Tab 2")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Milena workspace")).toHaveTextContent(
+      "Select a topic",
+    );
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("no tabs");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Inactive");
+    expect(screen.getByLabelText("Activity log")).not.toHaveTextContent(
+      "kafkaRecord",
+    );
+    expect(screen.queryByText("{\"old\":1}")).not.toBeInTheDocument();
+    expect(screen.queryByText("{\"old\":2}")).not.toBeInTheDocument();
+    expect(tauri.stopKafkaConsumerSession).toHaveBeenCalledWith({
+      sessionId: "session-1",
+    });
+    expect(tauri.stopKafkaConsumerSession).toHaveBeenCalledWith({
+      sessionId: "session-2",
+    });
+    expect(onChangeEnvironment).toHaveBeenCalledWith("local-dev");
+  });
+
+  it("rejects stale consumer events from the previous environment after the workspace reopens", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceShell onChangeEnvironment={vi.fn()} />);
+    await loadedTopics();
+
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-1");
+    emit("session-1", kafkaRecord("session-1", {
+      offset: 41,
+      payload: "{\"before\":true}",
+    }));
+    expect(await screen.findByText("{\"before\":true}")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Change environment" }));
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await screen.findByText("session-2");
+
+    emit("session-1", kafkaRecord("session-1", {
+      offset: 42,
+      payload: "{\"stale\":true}",
+    }));
+    emit("session-1", consumerError("session-1", "old environment failed"));
+
+    expect(pane("1")).not.toHaveTextContent("{\"before\":true}");
+    expect(pane("1")).not.toHaveTextContent("{\"stale\":true}");
+    expect(pane("1")).not.toHaveTextContent("old environment failed");
+    expect(screen.getByLabelText("Activity log")).not.toHaveTextContent(
+      "old environment failed",
+    );
+    expect(screen.getByLabelText("Activity log")).not.toHaveTextContent(
+      "orders.created p0 / 42",
+    );
+
+    emit("session-2", kafkaRecord("session-2", {
+      offset: 43,
+      payload: "{\"current\":true}",
+    }));
+    expect(await screen.findByText("{\"current\":true}")).toBeVisible();
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "orders.created p0 / 43",
+    );
+  });
+
+  it("keeps stale background cleanup failures out of the reset workspace activity", async () => {
+    const user = userEvent.setup();
+    let resolveStart: () => void = () => {
+      throw new Error("start resolver was not captured");
+    };
+    tauri.startKafkaConsumerSession.mockImplementationOnce(
+      async (request, onEvent) =>
+        new Promise<KafkaConsumerSession>((resolve) => {
+          resolveStart = () => {
+            const started = consumerSession(
+              "session-late",
+              "group-late",
+              request.topics[0],
+            );
+            registerSessionEventHandler(started.sessionId, onEvent);
+            resolve(started);
+          };
+        }),
+    );
+    tauri.stopKafkaConsumerSession.mockImplementation(async ({ sessionId }) => {
+      if (sessionId === "session-late") {
+        throw new Error("late cleanup failed");
+      }
+
+      return {
+        sessionId,
+        groupId: "group-late",
+        status: "stopped",
+        cleanup: {
+          groupId: "group-late",
+          attempted: true,
+          succeeded: true,
+          error: null,
+        },
+      };
+    });
+    render(<WorkspaceShell onChangeEnvironment={vi.fn()} />);
+    await loadedTopics();
+
+    await openTopic(user, "orders.created");
+    await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
+    await waitFor(() =>
+      expect(within(pane("1")).getAllByText("loading").length).toBeGreaterThan(
+        0,
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Change environment" }));
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveStart();
+    });
+
+    await waitFor(() =>
+      expect(tauri.stopKafkaConsumerSession).toHaveBeenCalledWith({
+        sessionId: "session-late",
+      }),
+    );
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Inactive");
+    expect(screen.getByLabelText("Activity log")).not.toHaveTextContent(
+      "late cleanup failed",
+    );
   });
 
   it("exposes compact appearance choices in the workspace inspector", async () => {
@@ -249,7 +413,7 @@ describe("App renderer flow harness", () => {
       within(screen.getByLabelText("Milena workspace"))
         .queryByRole("heading", { level: 1 }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
     expect(tauri.listKafkaTopics).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Refresh" }));
@@ -292,7 +456,7 @@ describe("App renderer flow harness", () => {
     );
 
     await user.click(topicSelect("orders.created"));
-    expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Publish" })).not.toBeInTheDocument();
     expect(
       within(screen.getByLabelText("Milena workspace"))
@@ -321,7 +485,7 @@ describe("App renderer flow harness", () => {
     expect(rightRail).not.toHaveTextContent("command-boundary");
     expect(rightRail).not.toHaveTextContent("event-channel");
     expect(rightRail).not.toHaveTextContent("macos-dev-build");
-    expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
     expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
   });
 
@@ -359,7 +523,7 @@ describe("App renderer flow harness", () => {
     expect(topicRow(longTopic)).toHaveAttribute("data-pinned", "false");
   });
 
-  it("shows compact selected pane state while keeping activity clearable", async () => {
+  it("shows compact selected tab state while keeping activity clearable", async () => {
     const user = userEvent.setup();
     const onClearActivity = vi.fn();
     render(
@@ -381,23 +545,35 @@ describe("App renderer flow harness", () => {
             time: "12:00:00",
           },
         ]}
-        layout="two-right"
         paneCount={2}
+        workspaceContext={{
+          activeGroupId: 2,
+          groupCount: 2,
+          tabCount: 2,
+        }}
         topicPreview={null}
         onClearActivity={onClearActivity}
       />,
     );
 
     const rightRail = screen.getByLabelText("Activity log");
-    expect(within(rightRail).getByText("Selected pane")).toBeVisible();
-    expect(within(rightRail).getAllByText("Pane 2").length).toBeGreaterThan(0);
+    expect(within(rightRail).getByText("Selected tab")).toBeVisible();
+    expect(within(rightRail).getAllByText("Tab 2").length).toBeGreaterThan(0);
     expect(within(rightRail).getByText("ready")).toBeVisible();
     expect(within(rightRail).getByText("payments.authorized")).toBeVisible();
     expect(within(rightRail).getByText("group-2")).toBeVisible();
-    expect(within(rightRail).getByText("2 panes / right")).toBeVisible();
+    expect(within(rightRail).getByText("2 tabs")).toBeVisible();
+    expect(
+      within(rightRail).getByText("Group 2 / 2 groups / 2 tabs"),
+    ).toBeVisible();
     expect(within(rightRail).getByText("Consumer session failed")).toBeVisible();
     expect(within(rightRail).getByText("broker heartbeat failed")).toBeVisible();
-    expect(rightRail).not.toHaveTextContent("Pane state");
+    expect(
+      within(rightRail.querySelector(".activity-log") as HTMLElement).getByText(
+        "Tab 2",
+      ),
+    ).toBeVisible();
+    expect(rightRail).not.toHaveTextContent("Tab state");
     expect(rightRail).not.toHaveTextContent("Topic preview");
     expect(rightRail).not.toHaveTextContent("command-boundary");
 
@@ -405,7 +581,7 @@ describe("App renderer flow harness", () => {
     expect(onClearActivity).toHaveBeenCalledOnce();
   });
 
-  it("shows inactive selected pane details without making activity look active", () => {
+  it("shows inactive selected tab details without making activity look active", () => {
     render(
       <RightRail
         activePane={{
@@ -414,8 +590,12 @@ describe("App renderer flow harness", () => {
           consumerGroup: null,
         }}
         activity={[]}
-        layout="single"
         paneCount={1}
+        workspaceContext={{
+          activeGroupId: 1,
+          groupCount: 1,
+          tabCount: 1,
+        }}
         topicPreview={null}
         onClearActivity={vi.fn()}
       />,
@@ -423,53 +603,126 @@ describe("App renderer flow harness", () => {
 
     const rightRail = screen.getByLabelText("Activity log");
     expect(within(rightRail).getByText("Inspector")).toBeVisible();
-    expect(within(rightRail).getByText("Selected pane")).toBeVisible();
-    expect(within(rightRail).getAllByText("Pane 1").length).toBeGreaterThan(0);
+    expect(within(rightRail).getByText("Selected tab")).toBeVisible();
+    expect(within(rightRail).getAllByText("Tab 1").length).toBeGreaterThan(0);
     expect(within(rightRail).getByText("idle")).toBeVisible();
     expect(within(rightRail).getAllByText("none")).toHaveLength(2);
-    expect(within(rightRail).getByText("1 pane")).toBeVisible();
+    expect(within(rightRail).getByText("1 tab")).toBeVisible();
+    expect(
+      within(rightRail).getByText("Group 1 / 1 group / 1 tab"),
+    ).toBeVisible();
     expect(within(rightRail).getByText("Activity & errors")).toBeVisible();
     expect(within(rightRail).getByText("Inactive")).toBeVisible();
-    expect(rightRail).not.toHaveTextContent("Pane state");
+    expect(rightRail).not.toHaveTextContent("Tab state");
     expect(rightRail).not.toHaveTextContent("Topic preview");
   });
 
-  it("opens topics only through explicit actions and enforces the four-pane split limit", async () => {
+  it("previews row selection and opens topics only through explicit actions", async () => {
     const { user } = renderApp();
     await loadedTopics();
 
     await user.click(topicSelect("orders.created"));
-    expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Topic preview",
+    );
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "orders.created",
+    );
 
     await openTopic(user, "orders.created");
     expect(pane("1")).toHaveTextContent("orders.created");
     expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
+  });
 
-    await openTopic(user, "payments.authorized", "Split right");
-    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Pane 2");
+  it("targets opens at the focused group without replacing existing tabs", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+
+    await openTopic(user, "orders.created");
+
+    await openTopic(user, "payments.authorized", "New group right");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Tab 2");
     expect(pane("2")).toHaveTextContent("payments.authorized");
     expect(screen.getByLabelText("Activity log")).toHaveTextContent(
       "payments.authorized",
     );
     expect(screen.getByLabelText("Activity log")).toHaveTextContent(
-      "2 panes / right",
+      "2 tabs",
+    );
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Group 2 / 2 groups / 2 tabs",
     );
 
     await user.click(pane("1"));
-    await openTopic(user, "inventory.adjusted", "Split top");
+    await openTopic(user, "inventory.adjusted");
 
-    expect(screen.getAllByLabelText(/Pane \d/)).toHaveLength(4);
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(2);
+    expect(pane("2")).toHaveTextContent("payments.authorized");
     expect(pane("3")).toHaveTextContent("inventory.adjusted");
-    expect(screen.getByLabelText("Activity log")).toHaveTextContent("2 x 2");
-    for (const button of screen.getAllByRole("button", { name: /Split pane/ })) {
-      expect(button).toBeDisabled();
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Tab 3");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "inventory.adjusted",
+    );
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Group 1 / 2 groups / 3 tabs",
+    );
+    expect(topicSelect("inventory.adjusted").closest(".topic")).toHaveClass(
+      "active",
+    );
+
+    await user.click(pane("2"));
+    await openTopic(user, "payments.authorized");
+
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(2);
+    expect(pane("4")).toHaveTextContent("payments.authorized");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Tab 4");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "milena-preview-4",
+    );
+    expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
+  });
+
+  it("enforces the four-pane split limit", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+
+    await openTopic(user, "orders.created");
+    await openTopic(user, "payments.authorized", "New group right");
+    await user.click(pane("2"));
+    await openTopic(user, "inventory.adjusted", "New group right");
+    await user.click(pane("3"));
+    await openTopic(user, "milena.issue14.cleanup", "New group right");
+
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(4);
+    expect(pane("4")).toHaveTextContent("milena.issue14.cleanup");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("4 tabs");
+    await user.click(pane("4"));
+    await openTopic(user, "payments.authorized", "New group right");
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(4);
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent(
+      "Group limit reached",
+    );
+  });
+
+  it("allows duplicate direct opens in the focused group and warns when it is full", async () => {
+    const { user } = renderApp();
+    await loadedTopics();
+
+    for (let index = 0; index < 8; index += 1) {
+      await openTopic(user, "orders.created");
     }
 
-    await openTopic(user, "payments.authorized", "Split right");
-    expect(screen.getAllByLabelText(/Pane \d/)).toHaveLength(4);
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(1);
+    expect(pane("8")).toHaveTextContent("orders.created");
+
+    await openTopic(user, "orders.created");
+
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(1);
     expect(screen.getByLabelText("Activity log")).toHaveTextContent(
-      "Pane limit reached",
+      "Max tabs opened in group",
     );
+    expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
   });
 
   it("starts latest-only polling, renders delivered events locally, records global activity, and stops cleanly", async () => {
@@ -505,7 +758,7 @@ describe("App renderer flow harness", () => {
 
     await user.click(
       within(pane("1")).getByRole("button", {
-        name: "Clear messages for pane 1",
+        name: "Clear messages for tab 1",
       }),
     );
     expect(pane("1")).not.toHaveTextContent('{"offset":42}');
@@ -530,7 +783,10 @@ describe("App renderer flow harness", () => {
       }),
     );
     expect(pane("1")).toHaveTextContent("idle");
-    expect(pane("1")).toHaveTextContent("Inactive");
+    expect(
+      within(pane("1")).getByRole("button", { name: "Poll" }),
+    ).toBeVisible();
+    expect(pane("1")).toHaveTextContent('{"offset":43}');
   });
 
   it("filters consumer records by key or payload and highlights visible matches", async () => {
@@ -557,7 +813,7 @@ describe("App renderer flow harness", () => {
     }));
 
     const paneOne = pane("1");
-    const filter = within(paneOne).getByLabelText("Filter records for pane 1");
+    const filter = within(paneOne).getByLabelText("Filter records for tab 1");
 
     await user.type(filter, "alpha");
     expect(messageRowButton("Order-Alpha-42")).toBeVisible();
@@ -670,28 +926,28 @@ describe("App renderer flow harness", () => {
     );
 
     const selectedClose = within(pane("1")).getByRole("button", {
-      name: "Close pane 1",
+      name: "Close tab 1",
     });
     const selectedActions = within(
       pane("1").querySelector(".pane-actions") as HTMLElement,
     ).getAllByRole("button");
     const unselectedClose = within(pane("2")).getByRole("button", {
-      name: "Close pane 2",
+      name: "Close tab 2",
     });
 
     expect(selectedClose).toBeVisible();
     expect(selectedActions.map((button) => button.getAttribute("aria-label")))
       .toEqual([
-        "Maximize pane 1",
-        "Close pane 1",
-        "Split pane 1 right",
-        "Split pane 1 top",
+        "Maximize tab 1",
+        "Close tab 1",
+        "Move tab 1 right",
+        "Move tab 1 bottom",
       ]);
     expect(
-      within(pane("1")).getByRole("button", { name: "Split pane 1 right" }),
+      within(pane("1")).getByRole("button", { name: "Move tab 1 right" }),
     ).toHaveTextContent("");
     expect(
-      within(pane("1")).getByRole("button", { name: "Split pane 1 top" }),
+      within(pane("1")).getByRole("button", { name: "Move tab 1 bottom" }),
     ).toHaveTextContent("");
     expect(unselectedClose).toBeVisible();
     expect(unselectedClose).toHaveClass("pane-close-button");
@@ -703,48 +959,38 @@ describe("App renderer flow harness", () => {
     expect(onCloseSelected).not.toHaveBeenCalled();
   });
 
-  it("expands a pane into the workspace and restores the prior pane layout", async () => {
+  it("maximizes a group and restores the prior tab workspace", async () => {
     const { user } = renderApp();
     await loadedTopics();
 
     await openTopic(user, "orders.created");
-    await openTopic(user, "payments.authorized", "Split right");
+    await openTopic(user, "payments.authorized", "New group right");
 
-    expect(screen.getAllByLabelText(/Pane \d/)).toHaveLength(2);
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(2);
     await user.click(
       within(pane("2")).getByRole("button", {
-        name: "Expand publisher for pane 2",
+        name: "Expand publisher for tab 2",
       }),
     );
     const paneTwoPayload = within(pane("2")).getByLabelText(
-      "JSON payload for pane 2",
+      "JSON payload for tab 2",
     );
     fireEvent.change(paneTwoPayload, { target: { value: "{\"draft\":2}" } });
     expect(paneTwoPayload).toHaveValue("{\"draft\":2}");
 
-    await user.click(
-      within(pane("1")).getByRole("button", { name: "Maximize pane 1" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Maximize group 1" }));
 
     expect(pane("1")).toHaveTextContent("orders.created");
-    expect(screen.queryByLabelText("Pane 2")).not.toBeInTheDocument();
     expect(
-      within(pane("1")).getByRole("button", { name: "Restore pane 1" }),
+      screen.getByRole("button", { name: "Restore group 1" }),
     ).toBeVisible();
 
-    await user.click(
-      within(pane("1")).getByRole("button", { name: "Restore pane 1" }),
-    );
-    expect(screen.getAllByLabelText(/Pane \d/)).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: "Restore group 1" }));
+    expect(screen.getAllByLabelText(/Tab \d/)).toHaveLength(2);
     expect(pane("1")).toHaveTextContent("orders.created");
     expect(pane("2")).toHaveTextContent("payments.authorized");
-    await user.click(
-      within(pane("2")).getByRole("button", {
-        name: "Expand publisher for pane 2",
-      }),
-    );
     expect(
-      within(pane("2")).getByLabelText("JSON payload for pane 2"),
+      within(pane("2")).getByLabelText("JSON payload for tab 2"),
     ).toHaveValue("{\"draft\":2}");
   });
 
@@ -752,7 +998,7 @@ describe("App renderer flow harness", () => {
     const { user } = renderApp();
     await loadedTopics();
     await openTopic(user, "orders.created");
-    await openTopic(user, "payments.authorized", "Split right");
+    await openTopic(user, "payments.authorized", "New group right");
 
     await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
     await screen.findByText("session-1");
@@ -770,8 +1016,8 @@ describe("App renderer flow harness", () => {
     expect(pane("1")).not.toHaveTextContent("{\"payment\":true}");
     expect(pane("2")).toHaveTextContent("{\"payment\":true}");
     expect(pane("2")).not.toHaveTextContent("broker heartbeat failed");
-    expect(screen.getByLabelText("Activity log")).toHaveTextContent("P1");
-    expect(screen.getByLabelText("Activity log")).toHaveTextContent("P2");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Tab 1");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("Tab 2");
     const paneOneSessionButtons = within(pane("1")).getAllByRole("button", {
       name: /^(Poll|Stop)$/,
     });
@@ -783,7 +1029,7 @@ describe("App renderer flow harness", () => {
     const { user } = renderApp();
     await loadedTopics();
     await openTopic(user, "orders.created");
-    await openTopic(user, "payments.authorized", "Split right");
+    await openTopic(user, "payments.authorized", "New group right");
     await user.click(pane("1"));
     await user.click(within(pane("1")).getByRole("button", { name: "Poll" }));
     await screen.findByText("session-1");
@@ -791,15 +1037,13 @@ describe("App renderer flow harness", () => {
       new Error("client cleanup failed"),
     );
 
-    await user.click(
-      within(pane("1")).getByRole("button", { name: "Close pane 1" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Close tab 1" }));
 
     await waitFor(() =>
-      expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument(),
+      expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument(),
     );
     expect(pane("2")).toHaveTextContent("payments.authorized");
-    expect(screen.getByLabelText("Activity log")).toHaveTextContent("1 pane");
+    expect(screen.getByLabelText("Activity log")).toHaveTextContent("1 tab");
     expect(tauri.stopKafkaConsumerSession).toHaveBeenCalledWith({
       sessionId: "session-1",
     });
@@ -839,14 +1083,16 @@ describe("App renderer flow harness", () => {
       ),
     );
 
-    await user.click(
-      within(pane("1")).getByRole("button", { name: "Close pane 1" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Close tab 1" }));
 
     await waitFor(() =>
-      expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument(),
+      expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument(),
     );
-    expect(tauri.stopKafkaConsumerSession).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(tauri.stopKafkaConsumerSession).toHaveBeenCalledWith({
+        sessionId: "milena-poll-tab-1",
+      }),
+    );
 
     await act(async () => {
       resolveStart();
@@ -857,7 +1103,7 @@ describe("App renderer flow harness", () => {
         sessionId: "session-loading",
       }),
     );
-    expect(screen.queryByLabelText("Pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Tab 1")).not.toBeInTheDocument();
   });
 
   it("keeps publisher collapsed by default and preserves pane drafts across collapse", async () => {
@@ -866,8 +1112,8 @@ describe("App renderer flow harness", () => {
     await openTopic(user, "orders.created");
 
     const paneOne = pane("1");
-    const consumer = within(paneOne).getByLabelText("Consumer for pane 1");
-    const publisher = within(paneOne).getByLabelText("Publisher for pane 1");
+    const consumer = within(paneOne).getByLabelText("Consumer for tab 1");
+    const publisher = within(paneOne).getByLabelText("Publisher for tab 1");
     expect(
       consumer.compareDocumentPosition(publisher) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
@@ -887,37 +1133,37 @@ describe("App renderer flow harness", () => {
     expect(
       within(paneOne).getByLabelText("Render mode for orders.created"),
     ).toBeVisible();
-    expect(screen.queryByLabelText("Kafka key for pane 1")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("JSON payload for pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Kafka key for tab 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("JSON payload for tab 1")).not.toBeInTheDocument();
 
     await user.click(
       within(publisher).getByRole("button", {
-        name: "Expand publisher for pane 1",
+        name: "Expand publisher for tab 1",
       }),
     );
     expect(paneOne.querySelector(".pane-workbench")).toHaveClass(
       "has-expanded-publisher",
     );
-    const key = screen.getByLabelText("Kafka key for pane 1");
-    const payload = screen.getByLabelText("JSON payload for pane 1");
+    const key = screen.getByLabelText("Kafka key for tab 1");
+    const payload = screen.getByLabelText("JSON payload for tab 1");
     fireEvent.change(key, { target: { value: "order-1" } });
     fireEvent.change(payload, { target: { value: "{\"id\":1}" } });
 
     await user.click(
       within(publisher).getByRole("button", {
-        name: "Collapse publisher for pane 1",
+        name: "Collapse publisher for tab 1",
       }),
     );
-    expect(screen.queryByLabelText("Kafka key for pane 1")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("JSON payload for pane 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Kafka key for tab 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("JSON payload for tab 1")).not.toBeInTheDocument();
 
     await user.click(
       within(publisher).getByRole("button", {
-        name: "Expand publisher for pane 1",
+        name: "Expand publisher for tab 1",
       }),
     );
-    expect(screen.getByLabelText("Kafka key for pane 1")).toHaveValue("order-1");
-    expect(screen.getByLabelText("JSON payload for pane 1")).toHaveValue(
+    expect(screen.getByLabelText("Kafka key for tab 1")).toHaveValue("order-1");
+    expect(screen.getByLabelText("JSON payload for tab 1")).toHaveValue(
       "{\"id\":1}",
     );
   });
@@ -927,8 +1173,8 @@ describe("App renderer flow harness", () => {
     await loadedTopics();
     await openTopic(user, "orders.created");
     await user.click(
-      within(screen.getByLabelText("Publisher for pane 1")).getByRole("button", {
-        name: "Expand publisher for pane 1",
+      within(screen.getByLabelText("Publisher for tab 1")).getByRole("button", {
+        name: "Expand publisher for tab 1",
       }),
     );
 
@@ -940,8 +1186,8 @@ describe("App renderer flow harness", () => {
       expect(screen.getAllByText("Ready to publish").length).toBeGreaterThan(0),
     );
 
-    const key = screen.getByLabelText("Kafka key for pane 1");
-    const payload = screen.getByLabelText("JSON payload for pane 1");
+    const key = screen.getByLabelText("Kafka key for tab 1");
+    const payload = screen.getByLabelText("JSON payload for tab 1");
     fireEvent.change(key, { target: { value: " order-1 " } });
     fireEvent.change(payload, { target: { value: "{\"id\":1,\"ok\":true}" } });
 
@@ -1002,7 +1248,7 @@ describe("App renderer flow harness", () => {
 
     expect(await screen.findByText("invalid JSON")).toBeVisible();
     expect(screen.getByText("{\"id\":")).toBeVisible();
-    const consumer = within(pane("1")).getByLabelText("Consumer for pane 1");
+    const consumer = within(pane("1")).getByLabelText("Consumer for tab 1");
     expect(within(consumer).queryByText("orders.created")).not.toBeInTheDocument();
     expect(messageRowButton("{\"id\":")).toHaveClass("has-key");
 
@@ -1088,7 +1334,7 @@ describe("App renderer flow harness", () => {
     const { user } = renderApp();
     await loadedTopics();
 
-    await user.click(topicOpenActions("orders.created"));
+    fireEvent.contextMenu(topicRow("orders.created"));
     const menu = await screen.findByRole("menu");
     expect(menu).toHaveTextContent("orders.created");
     expect(within(menu).getByRole("menuitem", { name: "Open" })).toBeVisible();
@@ -1096,25 +1342,28 @@ describe("App renderer flow harness", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
 
     await openTopic(user, "orders.created");
-    await user.click(topicOpenActions("payments.authorized"));
+    fireEvent.contextMenu(topicRow("payments.authorized"));
     const selectedMenu = await screen.findByRole("menu");
-    expect(within(selectedMenu).getByRole("menuitem", { name: "Open selected" }))
+    expect(
+      within(selectedMenu).getByRole("menuitem", {
+        name: "Open in focused group",
+      }),
+    ).toBeVisible();
+    expect(within(selectedMenu).getByRole("menuitem", { name: "New group right" }))
       .toBeVisible();
-    expect(within(selectedMenu).getByRole("menuitem", { name: "Split right" }))
-      .toBeVisible();
-    expect(within(selectedMenu).getByRole("menuitem", { name: "Split top" }))
-      .toBeVisible();
-    expect(within(selectedMenu).getByRole("menuitem", { name: "Split bottom" }))
+    expect(within(selectedMenu).getByRole("menuitem", { name: "New group bottom" }))
       .toBeVisible();
     await user.click(
-      within(selectedMenu).getByRole("menuitem", { name: "Open selected" }),
+      within(selectedMenu).getByRole("menuitem", {
+        name: "Open in focused group",
+      }),
     );
 
-    expect(pane("1")).toHaveTextContent("payments.authorized");
+    expect(pane("2")).toHaveTextContent("payments.authorized");
     expect(tauri.startKafkaConsumerSession).not.toHaveBeenCalled();
   });
 
-  it("stops stale polling when a topic replaces the selected pane", async () => {
+  it("keeps existing polling when a topic opens beside the selected tab", async () => {
     const { user } = renderApp();
     await loadedTopics();
 
@@ -1123,17 +1372,14 @@ describe("App renderer flow harness", () => {
     await screen.findByText("session-1");
     expect(tauri.startKafkaConsumerSession).toHaveBeenCalledOnce();
 
-    await openTopic(user, "payments.authorized", "Open selected");
+    await openTopic(user, "payments.authorized");
 
-    expect(tauri.stopKafkaConsumerSession).toHaveBeenCalledWith({
-      sessionId: "session-1",
-    });
+    expect(tauri.stopKafkaConsumerSession).not.toHaveBeenCalled();
     expect(tauri.startKafkaConsumerSession).toHaveBeenCalledOnce();
-    expect(pane("1")).toHaveTextContent("payments.authorized");
-    expect(pane("1")).not.toHaveTextContent("session-1");
+    expect(pane("2")).toHaveTextContent("payments.authorized");
     expect(screen.getByLabelText("Activity log")).toHaveTextContent("idle");
     expect(screen.getByLabelText("Activity log")).toHaveTextContent(
-      "milena-preview-1",
+      "milena-preview-2",
     );
     expect(screen.getByLabelText("Activity log")).not.toHaveTextContent(
       "group-1",
@@ -1171,6 +1417,257 @@ describe("App renderer flow harness", () => {
   });
 });
 
+describe("Dockview sync adapter", () => {
+  it("adds a tab to an existing split group without clearing and rebuilding the split", () => {
+    const split = openTopicInWorkspace(
+      openTopicInFocusedGroup(
+        createInitialWorkspaceState(),
+        "orders.created",
+      ).workspace,
+      "payments.authorized",
+      "bottom",
+    ).workspace;
+    const withNewTab = openTopicInWorkspace(
+      split,
+      "inventory.adjusted",
+      "selected",
+    ).workspace;
+    const api = createDockviewApiHarness([
+      ["tab-1"],
+      ["tab-2"],
+    ]);
+
+    syncDockviewWorkspace({
+      api: api.value,
+      workspace: withNewTab,
+      panelParams: dockviewPanelParams,
+      placementHint: null,
+    });
+
+    expect(api.clear).not.toHaveBeenCalled();
+    expect(api.addPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "tab-3",
+        title: "inventory.adjusted",
+        position: {
+          referencePanel: "tab-2",
+          direction: "within",
+          index: 1,
+        },
+      }),
+    );
+  });
+
+  it("moves an existing tab to a bottom split through Dockview instead of rebuilding", () => {
+    const workspace = openTopicInFocusedGroup(
+      openTopicInFocusedGroup(
+        createInitialWorkspaceState(),
+        "orders.created",
+      ).workspace,
+      "payments.authorized",
+    ).workspace;
+    const split = moveTabToAdjacentGroup(
+      selectTab(workspace, 2),
+      2,
+      "bottom",
+    ).workspace;
+    expect(split.groups.map((group) => group.tabs.map((tab) => tab.id))).toEqual([
+      [1],
+      [2],
+    ]);
+    const api = createDockviewApiHarness([["tab-1", "tab-2"]]);
+    const movingPanel = api.panelsById.get("tab-2");
+    const referenceGroup = api.panelsById.get("tab-1")?.group;
+
+    syncDockviewWorkspace({
+      api: api.value,
+      workspace: split,
+      panelParams: dockviewPanelParams,
+      placementHint: { tabId: 2, direction: "below" },
+    });
+
+    expect(api.clear).not.toHaveBeenCalled();
+    expect(movingPanel?.api.moveTo).toHaveBeenCalledWith({
+      group: referenceGroup,
+      position: "bottom",
+      index: 0,
+    });
+  });
+});
+
+type DockviewPanelHarness = {
+  id: string;
+  title: string;
+  group: DockviewGroupHarness;
+  api: {
+    moveTo: ReturnType<typeof vi.fn>;
+    setActive: ReturnType<typeof vi.fn>;
+    updateParameters: ReturnType<typeof vi.fn>;
+  };
+  setTitle: ReturnType<typeof vi.fn>;
+};
+
+type DockviewGroupHarness = {
+  id: string;
+  panels: DockviewPanelHarness[];
+  activePanel: DockviewPanelHarness | null;
+};
+
+function createDockviewApiHarness(groupPanelIds: string[][]) {
+  const panelsById = new Map<string, DockviewPanelHarness>();
+  let groups: DockviewGroupHarness[] = [];
+  let panels: DockviewPanelHarness[] = [];
+
+  function createGroup(panelIds: string[]) {
+    const group: DockviewGroupHarness = {
+      id: `dock-group-${groups.length + 1}`,
+      panels: [],
+      activePanel: null,
+    };
+    groups.push(group);
+    for (const panelId of panelIds) {
+      createPanel(panelId, group);
+    }
+    return group;
+  }
+
+  function createPanel(id: string, group: DockviewGroupHarness) {
+    const panel = {
+      id,
+      title: id,
+      group,
+      api: {
+        moveTo: vi.fn((options: {
+          group: DockviewGroupHarness;
+          position?: "bottom" | "center" | "left" | "right" | "top";
+          index?: number;
+        }) => {
+          movePanel(panel, options);
+        }),
+        setActive: vi.fn(),
+        updateParameters: vi.fn(),
+      },
+      setTitle: vi.fn((title: string) => {
+        panel.title = title;
+      }),
+    } satisfies DockviewPanelHarness;
+    group.panels.push(panel);
+    group.activePanel = panel;
+    panels.push(panel);
+    panelsById.set(id, panel);
+    return panel;
+  }
+
+  function movePanel(
+    panel: DockviewPanelHarness,
+    options: {
+      group: DockviewGroupHarness;
+      position?: "bottom" | "center" | "left" | "right" | "top";
+      index?: number;
+    },
+  ) {
+    panel.group.panels = panel.group.panels.filter(
+      (candidate) => candidate !== panel,
+    );
+    if (panel.group.activePanel === panel) {
+      panel.group.activePanel = panel.group.panels[0] ?? null;
+    }
+
+    if (!options.position || options.position === "center") {
+      panel.group = options.group;
+      options.group.panels.splice(options.index ?? options.group.panels.length, 0, panel);
+      options.group.activePanel = panel;
+      return;
+    }
+
+    const referenceIndex = groups.indexOf(options.group);
+    const targetGroup: DockviewGroupHarness = {
+      id: `dock-group-${groups.length + 1}`,
+      panels: [panel],
+      activePanel: panel,
+    };
+    panel.group = targetGroup;
+    groups.splice(referenceIndex + 1, 0, targetGroup);
+  }
+
+  for (const panelIds of groupPanelIds) {
+    createGroup(panelIds);
+  }
+
+  const clear = vi.fn(() => {
+    panels = [];
+    groups = [];
+    panelsById.clear();
+  });
+  const addPanel = vi.fn((options: {
+    id: string;
+    title?: string;
+    position?: {
+      referencePanel?: string | DockviewPanelHarness;
+      referenceGroup?: string | DockviewGroupHarness;
+      direction?: "below" | "right" | "within";
+      index?: number;
+    };
+  }) => {
+    const referencePanel =
+      typeof options.position?.referencePanel === "string"
+        ? panelsById.get(options.position.referencePanel)
+        : options.position?.referencePanel;
+    const referenceGroup =
+      typeof options.position?.referenceGroup === "string"
+        ? groups.find((group) => group.id === options.position?.referenceGroup)
+        : options.position?.referenceGroup;
+    const targetGroup = referencePanel?.group ?? referenceGroup;
+
+    if (
+      targetGroup &&
+      (!options.position?.direction || options.position.direction === "within")
+    ) {
+      return createPanel(options.id, targetGroup);
+    }
+
+    const group = createGroup([]);
+    return createPanel(options.id, group);
+  });
+
+  return {
+    addPanel,
+    clear,
+    panelsById,
+    value: {
+      get panels() {
+        return panels;
+      },
+      get groups() {
+        return groups;
+      },
+      get width() {
+        return 1_000;
+      },
+      get height() {
+        return 700;
+      },
+      addPanel,
+      clear,
+      exitMaximizedGroup: vi.fn(),
+      getPanel: (id: string) => panelsById.get(id),
+      hasMaximizedGroup: () => false,
+      layout: vi.fn(),
+      removePanel: vi.fn((panel: DockviewPanelHarness) => {
+        panel.group.panels = panel.group.panels.filter(
+          (candidate) => candidate !== panel,
+        );
+        panels = panels.filter((candidate) => candidate !== panel);
+        panelsById.delete(panel.id);
+      }),
+    } as never,
+  };
+}
+
+function dockviewPanelParams(pane: WorkspacePane) {
+  return { pane } as never;
+}
+
 function paneRenderProps({
   pane,
   active = true,
@@ -1181,7 +1678,7 @@ function paneRenderProps({
   onRestore = vi.fn(),
   isExpanded = false,
 }: {
-  pane: WorkspacePane;
+  pane: WorkspaceTab;
   active?: boolean;
   onPoll?: () => void;
   onStop?: () => void;
@@ -1221,11 +1718,12 @@ function paneRenderProps({
   };
 }
 
-function paneState(status: WorkspacePane["status"]): WorkspacePane {
+function paneState(status: WorkspaceTab["status"]): WorkspaceTab {
   const polling = status === "loading" || status === "ready" || status === "error";
   return {
     id: 1,
     topic: "orders.created",
+    title: "orders.created",
     consumerGroup: polling ? "group-stateful" : "milena-preview-1",
     mode: polling ? "poll" : "idle",
     status,

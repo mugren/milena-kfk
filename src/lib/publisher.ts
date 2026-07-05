@@ -8,7 +8,11 @@ import type {
   PublishKafkaRecordResponse,
   RuntimeAuthConfig,
 } from "./tauri";
-import type { WorkspacePane, WorkspaceState } from "./workspace";
+import {
+  assignTopicToPane,
+  type WorkspacePane,
+  type WorkspaceState,
+} from "./workspace";
 
 export type PublisherStatus = "idle" | "sending" | "delivered" | "error";
 
@@ -198,6 +202,9 @@ export async function openCombinedPublishPollPane({
 }: CombinedPublishPollOptions): Promise<KafkaConsumerSession | null> {
   updatePublisherState((current) =>
     openPublisherPane(current, pollingOptions.paneId, pollingOptions.topic),
+  );
+  pollingOptions.updateWorkspace((current) =>
+    assignTopicToPane(current, pollingOptions.paneId, pollingOptions.topic),
   );
 
   return startPanePollingSession(pollingOptions);
