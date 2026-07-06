@@ -1,6 +1,6 @@
 [package]
 name = "milena"
-version = "0.3.0"
+version = "0.3.1"
 description = "Milena local macOS Kafka developer workbench"
 authors = ["Milena contributors"]
 edition = "2021"
